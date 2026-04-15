@@ -1,0 +1,11 @@
+[tasks.backend-dev]
+install_crate = "cargo-watch"
+command = "cargo"
+args = ["watch", "-w", "backend", "-w", "shared", "-x", "run --bin backend"]
+
+[tasks.frontend-dev]
+command = "npm"
+args = ["run", "dev", "--prefix", "frontend"]
+
+[tasks.dev]
+run_task = { name = ["backend-dev", "frontend-dev"], parallel = true }
