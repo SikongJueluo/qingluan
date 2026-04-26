@@ -1,32 +1,73 @@
-# SolidStart
+# frontend
 
-Everything you need to build a Solid project, powered by [`solid-start`](https://start.solidjs.com);
+This template should help get you started developing with Vue 3 in Vite.
 
-## Creating a project
+## Recommended IDE Setup
 
-```bash
-# create a new project in the current directory
-npm init solid@latest
+[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
 
-# create a new project in my-app
-npm init solid@latest my-app
+## Recommended Browser Setup
+
+- Chromium-based browsers (Chrome, Edge, Brave, etc.):
+  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
+  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
+- Firefox:
+  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
+  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
+
+## Type Support for `.vue` Imports in TS
+
+TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
+
+## Customize configuration
+
+See [Vite Configuration Reference](https://vite.dev/config/).
+
+## Project Setup
+
+```sh
+bun install
 ```
 
-## Developing
+### Compile and Hot-Reload for Development
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```bash
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+```sh
+bun dev
 ```
 
-## Building
+### Type-Check, Compile and Minify for Production
 
-Solid apps are built with _presets_, which optimise your project for deployment to different environments.
+```sh
+bun run build
+```
 
-By default, `npm run build` will generate a Node app that you can run with `npm start`. To use a different preset, add it to the `devDependencies` in `package.json` and specify in your `app.config.js`.
+### Run Unit Tests with [Vitest](https://vitest.dev/)
 
-## This project was created with the [Solid CLI](https://github.com/solidjs-community/solid-cli)
+```sh
+bun test:unit
+```
+
+### Run End-to-End Tests with [Playwright](https://playwright.dev)
+
+```sh
+# Install browsers for the first run
+npx playwright install
+
+# When testing on CI, must build the project first
+bun run build
+
+# Runs the end-to-end tests
+bun test:e2e
+# Runs the tests only on Chromium
+bun test:e2e --project=chromium
+# Runs the tests of a specific file
+bun test:e2e tests/example.spec.ts
+# Runs the tests in debug mode
+bun test:e2e --debug
+```
+
+### Lint with [ESLint](https://eslint.org/)
+
+```sh
+bun lint
+```
