@@ -4,8 +4,9 @@ import { mount } from '@vue/test-utils'
 import App from '../App.vue'
 
 describe('App', () => {
-  it('mounts renders properly', () => {
+  it('mounts and renders the sidebar shell', () => {
     const wrapper = mount(App)
-    expect(wrapper.text()).toContain('You did it!')
+    expect(wrapper.text()).toContain('Acme Inc')
+    expect(wrapper.text()).toContain('Home')
   })
 })
