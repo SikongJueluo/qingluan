@@ -1,0 +1,22 @@
+[package]
+name = "qingluan-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "qingluan-daemon"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+qingluan-protocol = { path = "../qingluan-protocol" }
+qingluan-core = { path = "../qingluan-core" }
+qingluan-sandbox = { path = "../qingluan-sandbox" }

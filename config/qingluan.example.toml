@@ -1,0 +1,14 @@
+# Qingluan daemon configuration example.
+# Copy to ~/.config/qingluan/config.toml and adjust.
+
+[daemon]
+host = "127.0.0.1"
+port = 47129
+
+[sandbox]
+provider = "local"
+
+[cube]
+endpoint = "http://127.0.0.1:8000"
+api_key = "env:CUBE_API_KEY"
+template = "qingluan-dev"

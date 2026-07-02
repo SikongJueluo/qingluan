@@ -34,3 +34,14 @@ target
 *.njsproj
 *.sln
 *.sw?
+
+# Node
+apps/desktop/frontend/node_modules
+apps/desktop/frontend/dist
+
+# Tauri
+apps/desktop/src-tauri/target
+
+# IDE
+.idea/
+*.iml

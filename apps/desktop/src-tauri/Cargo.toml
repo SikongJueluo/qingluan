@@ -1,0 +1,23 @@
+[package]
+name = "qingluan-desktop"
+version.workspace = true
+description = "Qingluan Desktop - Tauri desktop shell for the Qingluan task platform"
+authors = ["Qingluan Team"]
+license.workspace = true
+edition.workspace = true
+default-run = "qingluan-desktop"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+reqwest = { workspace = true }
+tokio.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

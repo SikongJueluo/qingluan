@@ -1,11 +1,17 @@
 [tasks.backend-dev]
 install_crate = "cargo-watch"
 command = "cargo"
-args = ["watch", "-w", "backend", "-w", "shared", "-x", "run --bin backend"]
+args = ["watch", "-w", "crates/qingluan-daemon", "-w", "crates/qingluan-protocol", "-w", "crates/qingluan-sandbox", "-x", "run -p qingluan-daemon"]
 
 [tasks.frontend-dev]
-command = "npm"
-args = ["run", "dev", "--prefix", "frontend"]
+command = "bun"
+args = ["run", "dev"]
+cwd = "apps/desktop/frontend"
+
+[tasks.tauri-dev]
+command = "bun"
+args = ["tauri", "dev"]
+cwd = "apps/desktop/frontend"
 
 [tasks.dev]
 run_task = { name = ["backend-dev", "frontend-dev"], parallel = true }
