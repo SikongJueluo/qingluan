@@ -39,6 +39,14 @@
                   </router-link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton as-child>
+                  <router-link to="/kanban">
+                    <Kanban />
+                    <span>任务看板</span>
+                  </router-link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -78,7 +86,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { FileText, Home, Bird } from "lucide-vue-next";
+import { FileText, Home, Bird, Kanban } from "lucide-vue-next";
 </script>
 
 <style scoped></style>

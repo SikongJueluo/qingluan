@@ -17,6 +17,7 @@
     "format": "oxfmt src/"
   },
   "dependencies": {
+    "@formkit/drag-and-drop": "^0.6.1",
     "@lucide/vue": "^1.22.0",
     "@tailwindcss/vite": "^4.2.4",
     "@tanstack/vue-table": "^8.21.3",

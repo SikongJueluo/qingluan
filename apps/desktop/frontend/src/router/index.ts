@@ -15,6 +15,11 @@ const router = createRouter({
       name: 'markdown-review',
       component: MarkdownReviewDemoView,
     },
+    {
+      path: '/kanban',
+      name: 'kanban',
+      component: () => import('@/views/KanbanBoardView.vue'),
+    },
   ],
 })
 

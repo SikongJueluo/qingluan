@@ -45,3 +45,7 @@ apps/desktop/src-tauri/target
 # IDE
 .idea/
 *.iml
+
+# Vibe Coding
+.qoder/
+docs/superpowers/
