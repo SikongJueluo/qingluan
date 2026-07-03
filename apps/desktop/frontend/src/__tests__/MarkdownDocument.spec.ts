@@ -55,17 +55,23 @@ describe('MarkdownDocument', () => {
 
     // click the block -> toolbar appears (teleported to body)
     await wrapper.find('[data-block-id="heading-1"]').trigger('click')
-    await document.querySelector('[data-testid="comment-heading-1"]')?.dispatchEvent(new Event('click', { bubbles: true }))
+    await document
+      .querySelector('[data-testid="comment-heading-1"]')
+      ?.dispatchEvent(new Event('click', { bubbles: true }))
 
     // comment input popup should now exist on body
-    const input = document.querySelector('[data-testid="comment-input-heading-1"]') as HTMLTextAreaElement | null
+    const input = document.querySelector(
+      '[data-testid="comment-input-heading-1"]',
+    ) as HTMLTextAreaElement | null
     expect(input).toBeTruthy()
     input!.value = 'looks good'
     input!.dispatchEvent(new Event('input', { bubbles: true }))
     await wrapper.vm.$nextTick()
 
     // submit
-    document.querySelector('[data-testid="comment-submit-heading-1"]')?.dispatchEvent(new Event('click', { bubbles: true }))
+    document
+      .querySelector('[data-testid="comment-submit-heading-1"]')
+      ?.dispatchEvent(new Event('click', { bubbles: true }))
     await wrapper.vm.$nextTick()
 
     // bubble with count should now be rendered in the document frame

@@ -37,20 +37,18 @@ function handleDrop(event: DragEvent, columnId: TaskStatus) {
     <ScrollArea class="flex-1">
       <div
         ref="cardList"
-        :class="cn(
-          'flex min-h-[80px] flex-col gap-2 p-2 transition-all',
-          dragOverColumn === column.id && 'ring-2 ring-inset ring-primary/30 rounded-md',
-        )"
+        :class="
+          cn(
+            'flex min-h-[80px] flex-col gap-2 p-2 transition-all',
+            dragOverColumn === column.id && 'ring-2 ring-inset ring-primary/30 rounded-md',
+          )
+        "
         @dragenter="onDragEnter($event, column.id)"
         @dragover="onDragOver($event)"
         @dragleave="onDragLeave($event)"
         @drop="handleDrop($event, column.id)"
       >
-        <KanbanCard
-          v-for="task in tasks"
-          :key="task.id"
-          :task="task"
-        />
+        <KanbanCard v-for="task in tasks" :key="task.id" :task="task" />
       </div>
     </ScrollArea>
   </div>

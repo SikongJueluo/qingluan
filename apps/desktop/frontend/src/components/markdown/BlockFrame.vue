@@ -19,18 +19,14 @@ const { commentsFor, addComment } = useBlockComments()
 
 const selected = computed(() => selection.selectedBlockIds.value.has(props.block.id))
 
-const {
-  toolbar,
-  comment,
-  draft,
-  openToolbar,
-  openComment,
-  closeComment,
-  setDraft,
-} = interaction
+const { toolbar, comment, draft, openToolbar, openComment, closeComment } = interaction
 
-const showToolbar = computed(() => toolbar.value?.blockId === props.block.id && comment.value === null)
-const commentPos = computed(() => (comment.value?.blockId === props.block.id ? comment.value : null))
+const showToolbar = computed(
+  () => toolbar.value?.blockId === props.block.id && comment.value === null,
+)
+const commentPos = computed(() =>
+  comment.value?.blockId === props.block.id ? comment.value : null,
+)
 
 const blockComments = commentsFor(props.block.id)
 
@@ -124,9 +120,7 @@ function closeBubble() {
           class="mb-2 min-h-20"
         />
         <div class="flex justify-end gap-2">
-          <Button variant="ghost" size="sm" @click.stop="cancelComment">
-            取消
-          </Button>
+          <Button variant="ghost" size="sm" @click.stop="cancelComment"> 取消 </Button>
           <Button
             size="sm"
             :data-testid="`comment-submit-${block.id}`"
@@ -148,9 +142,7 @@ function closeBubble() {
         :style="bubbleStyle"
         @click.stop
       >
-        <div class="mb-2 text-sm font-medium">
-          评论 ({{ blockComments.length }})
-        </div>
+        <div class="mb-2 text-sm font-medium">评论 ({{ blockComments.length }})</div>
         <ul v-if="blockComments.length" class="space-y-2 text-sm">
           <li
             v-for="c in blockComments"

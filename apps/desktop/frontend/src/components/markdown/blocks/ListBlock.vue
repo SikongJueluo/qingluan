@@ -7,7 +7,9 @@ const props = defineProps<{
   block: MarkdownBlock
 }>()
 
-const ordered = computed(() => props.block.meta?.ordered === true || props.block.meta?.listType === 'ordered')
+const ordered = computed(
+  () => props.block.meta?.ordered === true || props.block.meta?.listType === 'ordered',
+)
 const tag = computed(() => (ordered.value ? 'ol' : 'ul'))
 const items = computed(() => props.block.children ?? [])
 </script>

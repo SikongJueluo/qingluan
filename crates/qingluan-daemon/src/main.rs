@@ -4,10 +4,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use qingluan_core;
-use qingluan_protocol::{
-    ApiResponse, CreateTaskRequest, HealthResponse, TaskEvent, TaskId,
-};
+use qingluan_protocol::{ApiResponse, CreateTaskRequest, HealthResponse, TaskEvent, TaskId};
 use serde::Deserialize;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -69,9 +66,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<ApiResponse<HealthRe
 }
 
 /// POST /tasks — create a new task.
-async fn create_task(
-    Json(payload): Json<CreateTaskRequest>,
-) -> Json<ApiResponse<TaskEvent>> {
+async fn create_task(Json(payload): Json<CreateTaskRequest>) -> Json<ApiResponse<TaskEvent>> {
     let task_id = TaskId(Uuid::now_v7().to_string());
 
     tracing::info!(
@@ -85,9 +80,7 @@ async fn create_task(
 }
 
 /// GET /tasks/:id — get task status.
-async fn get_task(
-    Path(task_id): Path<String>,
-) -> Json<ApiResponse<serde_json::Value>> {
+async fn get_task(Path(task_id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
     Json(ApiResponse::success(serde_json::json!({
         "task_id": task_id,
         "status": "queued",

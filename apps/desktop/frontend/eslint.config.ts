@@ -34,5 +34,30 @@ export default defineConfigWithVueTs(
 
   ...pluginOxlint.buildFromOxlintConfigFile('.oxlintrc.json'),
 
+  {
+    name: 'qingluan/quality-gate',
+    files: ['src/**/*.{vue,ts,mts,tsx}'],
+    rules: {
+      complexity: ['warn', 12],
+      'max-depth': ['error', 3],
+      'max-lines': ['warn', { max: 700, skipBlankLines: true, skipComments: true }],
+      'max-lines-per-function': ['warn', { max: 100, skipBlankLines: true, skipComments: true }],
+      'no-console': ['warn', { allow: ['warn', 'error'] }],
+      'no-debugger': 'error',
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/consistent-type-imports': 'warn',
+      'vue/no-mutating-props': 'error',
+      'vue/no-v-html': 'warn',
+    },
+  },
+
+  {
+    name: 'qingluan/shadcn-ui-relax',
+    files: ['src/components/ui/**/*.{vue,ts}'],
+    rules: {
+      'vue/multi-word-component-names': 'off',
+    },
+  },
+
   skipFormatting,
 )

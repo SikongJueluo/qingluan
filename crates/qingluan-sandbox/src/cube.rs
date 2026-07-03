@@ -1,8 +1,10 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::{CommandResult, CreateSandboxRequest, RunCommandRequest, SandboxHandle, SandboxProvider};
+use crate::{
+    CommandResult, CreateSandboxRequest, RunCommandRequest, SandboxHandle, SandboxProvider,
+};
 
 /// Configuration for the CubeSandbox provider.
 #[derive(Debug, Clone, Deserialize)]
@@ -31,7 +33,11 @@ impl SandboxProvider for CubeSandboxProvider {
         bail!("cube_provider_not_implemented: CubeSandbox integration is pending")
     }
 
-    async fn run_command(&self, _sandbox_id: &str, _req: RunCommandRequest) -> Result<CommandResult> {
+    async fn run_command(
+        &self,
+        _sandbox_id: &str,
+        _req: RunCommandRequest,
+    ) -> Result<CommandResult> {
         bail!("cube_provider_not_implemented: CubeSandbox integration is pending")
     }
 

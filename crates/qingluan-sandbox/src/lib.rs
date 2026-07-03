@@ -1,5 +1,5 @@
-pub mod local;
 pub mod cube;
+pub mod local;
 
 use anyhow::Result;
 use async_trait::async_trait;

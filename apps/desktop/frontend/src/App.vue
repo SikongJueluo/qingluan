@@ -85,8 +85,8 @@ import {
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
-} from "@/components/ui/sidebar";
-import { FileText, Home, Bird, Kanban } from "lucide-vue-next";
+} from '@/components/ui/sidebar'
+import { FileText, Home, Bird, Kanban } from 'lucide-vue-next'
 </script>
 
 <style scoped></style>

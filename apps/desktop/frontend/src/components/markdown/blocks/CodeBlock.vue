@@ -15,6 +15,8 @@ defineProps<{
       </Badge>
     </div>
 
-    <pre class="overflow-x-auto p-4 text-sm leading-6"><code>{{ block.raw ?? block.text }}</code></pre>
+    <pre
+      class="overflow-x-auto p-4 text-sm leading-6"
+    ><code>{{ block.raw ?? block.text }}</code></pre>
   </div>
 </template>

@@ -49,3 +49,8 @@ apps/desktop/src-tauri/target
 # Vibe Coding
 .qoder/
 docs/superpowers/
+.fallow/
+
+# Quality reports
+target/quality/
+apps/desktop/frontend/coverage/

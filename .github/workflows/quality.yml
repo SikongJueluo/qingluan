@@ -1,0 +1,37 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop/frontend
+        run: bun install --frozen-lockfile
+
+      - name: Rust quality
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --all-targets
+
+      - name: Frontend quality
+        working-directory: apps/desktop/frontend
+        run: bun run quality

@@ -10,7 +10,12 @@ const blocks: MarkdownBlock[] = [
     order: 2,
     text: '这是一个 Notion 风格的 Markdown 阅读审查界面示例。每个段落、标题、代码块和表格都是独立 block。',
   },
-  { id: 'block-3', type: 'blockquote', order: 3, text: '审查界面应该突出内容，同时让评论入口保持轻量。' },
+  {
+    id: 'block-3',
+    type: 'blockquote',
+    order: 3,
+    text: '审查界面应该突出内容，同时让评论入口保持轻量。',
+  },
   {
     id: 'block-4',
     type: 'code',

@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
-use qingluan_protocol::{ApiResponse, CreateTaskRequest, HealthResponse, SandboxProfile, TaskKind, SandboxProviderKind};
+use qingluan_protocol::{
+    ApiResponse, CreateTaskRequest, HealthResponse, SandboxProfile, SandboxProviderKind, TaskKind,
+};
 use reqwest::Client;
-use serde_json;
 
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:47129";
 
@@ -91,7 +92,9 @@ async fn main() {
             cmd_task(&cli.daemon_url, action).await;
         }
         Commands::Ui => {
-            tracing::error!("UI not yet implemented. Run the Tauri desktop app or open the web frontend.");
+            tracing::error!(
+                "UI not yet implemented. Run the Tauri desktop app or open the web frontend."
+            );
             std::process::exit(1);
         }
     }
@@ -109,13 +112,19 @@ async fn cmd_health(daemon_url: &str) {
             }
             Err(e) => {
                 tracing::error!("Failed to parse health response: {e}");
-                eprintln!("{{\"ok\":false,\"error\":\"parse_error\",\"message\":\"{}\"}}", e);
+                eprintln!(
+                    "{{\"ok\":false,\"error\":\"parse_error\",\"message\":\"{}\"}}",
+                    e
+                );
                 std::process::exit(1);
             }
-        }
+        },
         Err(e) => {
             tracing::error!("Daemon unreachable at {}: {e}", daemon_url);
-            eprintln!("{{\"ok\":false,\"error\":\"daemon_unreachable\",\"message\":\"Daemon is not running at {}. Start it with: qingluan-daemon\"}}", daemon_url);
+            eprintln!(
+                "{{\"ok\":false,\"error\":\"daemon_unreachable\",\"message\":\"Daemon is not running at {}. Start it with: qingluan-daemon\"}}",
+                daemon_url
+            );
             std::process::exit(1);
         }
     }
@@ -123,8 +132,18 @@ async fn cmd_health(daemon_url: &str) {
 
 async fn cmd_task(daemon_url: &str, action: TaskAction) {
     let (workspace, kind, sandbox_provider, _json) = match action {
-        TaskAction::Create { workspace, kind, sandbox, json } => (workspace, kind, sandbox, json),
-        TaskAction::Run { workspace, command, sandbox, json } => {
+        TaskAction::Create {
+            workspace,
+            kind,
+            sandbox,
+            json,
+        } => (workspace, kind, sandbox, json),
+        TaskAction::Run {
+            workspace,
+            command,
+            sandbox,
+            json,
+        } => {
             // Wrap bare command into CustomCommand
             let kind = format!("custom:{}", command);
             (workspace, kind, sandbox, json)
@@ -140,7 +159,10 @@ async fn cmd_task(daemon_url: &str, action: TaskAction) {
             TaskKind::CustomCommand { command: cmd }
         }
         other => {
-            eprintln!("{{\"ok\":false,\"error\":\"invalid_kind\",\"message\":\"Unknown task kind: {}\"}}", other);
+            eprintln!(
+                "{{\"ok\":false,\"error\":\"invalid_kind\",\"message\":\"Unknown task kind: {}\"}}",
+                other
+            );
             std::process::exit(1);
         }
     };
@@ -149,7 +171,10 @@ async fn cmd_task(daemon_url: &str, action: TaskAction) {
         "local" => SandboxProviderKind::Local,
         "cube" => SandboxProviderKind::Cube,
         other => {
-            eprintln!("{{\"ok\":false,\"error\":\"invalid_provider\",\"message\":\"Unknown provider: {}\"}}", other);
+            eprintln!(
+                "{{\"ok\":false,\"error\":\"invalid_provider\",\"message\":\"Unknown provider: {}\"}}",
+                other
+            );
             std::process::exit(1);
         }
     };
@@ -175,13 +200,19 @@ async fn cmd_task(daemon_url: &str, action: TaskAction) {
                 println!("{}", serde_json::to_string_pretty(&body).unwrap());
             }
             Err(e) => {
-                eprintln!("{{\"ok\":false,\"error\":\"parse_error\",\"message\":\"{}\"}}", e);
+                eprintln!(
+                    "{{\"ok\":false,\"error\":\"parse_error\",\"message\":\"{}\"}}",
+                    e
+                );
                 std::process::exit(1);
             }
-        }
+        },
         Err(e) => {
             tracing::error!("Daemon unreachable at {}: {e}", daemon_url);
-            eprintln!("{{\"ok\":false,\"error\":\"daemon_unreachable\",\"message\":\"Daemon is not running at {}. Start it with: qingluan-daemon\"}}", daemon_url);
+            eprintln!(
+                "{{\"ok\":false,\"error\":\"daemon_unreachable\",\"message\":\"Daemon is not running at {}. Start it with: qingluan-daemon\"}}",
+                daemon_url
+            );
             std::process::exit(1);
         }
     }

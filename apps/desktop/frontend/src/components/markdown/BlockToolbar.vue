@@ -38,12 +38,8 @@ const emit = defineEmits<{
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        <DropdownMenuItem @click="emit('copyText')">
-          复制纯文本
-        </DropdownMenuItem>
-        <DropdownMenuItem @click="emit('copyRaw')">
-          复制 Markdown 原文
-        </DropdownMenuItem>
+        <DropdownMenuItem @click="emit('copyText')"> 复制纯文本 </DropdownMenuItem>
+        <DropdownMenuItem @click="emit('copyRaw')"> 复制 Markdown 原文 </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>

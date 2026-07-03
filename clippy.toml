@@ -1,0 +1,2 @@
+# Clippy configuration for qingluan
+# Lint thresholds are controlled via CLI flags in .justfile

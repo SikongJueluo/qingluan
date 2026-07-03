@@ -22,7 +22,10 @@ const table = computed(() => props.block.meta?.table as MarkdownTableMeta | unde
     <Table v-if="table">
       <TableHeader>
         <TableRow>
-          <TableHead v-for="(header, headerIndex) in table.headers" :key="`${header}-${headerIndex}`">
+          <TableHead
+            v-for="(header, headerIndex) in table.headers"
+            :key="`${header}-${headerIndex}`"
+          >
             {{ header }}
           </TableHead>
         </TableRow>

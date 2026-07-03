@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use crate::{CommandResult, CreateSandboxRequest, RunCommandRequest, SandboxHandle, SandboxProvider};
+use crate::{
+    CommandResult, CreateSandboxRequest, RunCommandRequest, SandboxHandle, SandboxProvider,
+};
 
 /// A sandbox provider that runs commands locally via `tokio::process::Command`.
 pub struct LocalSandboxProvider;
@@ -15,7 +17,11 @@ impl SandboxProvider for LocalSandboxProvider {
         })
     }
 
-    async fn run_command(&self, _sandbox_id: &str, req: RunCommandRequest) -> Result<CommandResult> {
+    async fn run_command(
+        &self,
+        _sandbox_id: &str,
+        req: RunCommandRequest,
+    ) -> Result<CommandResult> {
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
             c.arg("/C").arg(&req.command);
@@ -30,7 +36,10 @@ impl SandboxProvider for LocalSandboxProvider {
             cmd.current_dir(cwd);
         }
 
-        let output = cmd.output().await.context("failed to execute local command")?;
+        let output = cmd
+            .output()
+            .await
+            .context("failed to execute local command")?;
 
         Ok(CommandResult {
             exit_code: output.status.code().unwrap_or(-1),

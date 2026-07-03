@@ -2,12 +2,7 @@
   <ScrollArea class="h-full">
     <ScrollBar orientation="horizontal" />
     <div class="flex flex-row gap-4 p-4 h-full">
-      <KanbanColumn
-        v-for="col in columns"
-        :key="col.id"
-        :column="col"
-        :tasks="col.tasks"
-      />
+      <KanbanColumn v-for="col in columns" :key="col.id" :column="col" :tasks="col.tasks" />
     </div>
   </ScrollArea>
 </template>

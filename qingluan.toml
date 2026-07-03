@@ -18,5 +18,11 @@ exclude = [
 [tasks.code_review]
 command = "echo code-review placeholder"
 
+[tasks.quality]
+command = "just quality"
+
+[tasks.quality_soft]
+command = "just quality-soft"
+
 [tasks.test]
-command = "cargo test --workspace"
+command = "just quality"
