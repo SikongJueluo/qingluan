@@ -1,0 +1,28 @@
+{
+  "name": "qingluan-pi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Qingluan workspace session switching for the Pi coding agent (/ws)",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^24.0.0",
+    "typescript": "^5"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test src/catalog.test.ts"
+  }
+}

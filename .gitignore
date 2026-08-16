@@ -36,6 +36,7 @@ target
 *.sw?
 
 # Node
+node_modules
 apps/desktop/frontend/node_modules
 apps/desktop/frontend/dist
 
