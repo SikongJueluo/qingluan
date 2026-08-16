@@ -54,3 +54,14 @@ docs/superpowers/
 # Quality reports
 target/quality/
 apps/desktop/frontend/coverage/
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
