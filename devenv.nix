@@ -3,8 +3,7 @@
   lib,
   config,
   ...
-}:
-{
+}: {
   # https://devenv.sh/packages/
   packages = [
     pkgs.cargo-tauri
@@ -13,8 +12,10 @@
 
   # https://devenv.sh/languages/
   languages = {
+    nix.enable = true;
     rust = {
       enable = true;
+      lsp.enable = true;
     };
 
     javascript = {
