@@ -1,5 +1,3 @@
-set shell := ["pwsh", "-c"]
-
 # ── Qingluan ──
 
 # Frontend
@@ -15,6 +13,14 @@ frontend-test:
 # Rust
 daemon-dev:
     cargo run -p qingluan-daemon
+
+# Backend + frontend in parallel (formerly `cargo-make dev`)
+dev:
+    (just daemon-watch) & (just frontend-dev) & wait
+
+# Watch mode daemon rebuilds (requires cargo-watch, in devenv packages)
+daemon-watch:
+    cargo watch -w crates/qingluan-daemon -w crates/qingluan-protocol -w crates/qingluan-sandbox -x "run -p qingluan-daemon"
 
 cli ARGS='':
     cargo run -p qingluan-cli -- {{ARGS}}

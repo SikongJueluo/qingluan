@@ -8,6 +8,7 @@
   # https://devenv.sh/packages/
   packages = [
     pkgs.cargo-tauri
+    pkgs.cargo-watch
   ];
 
   # https://devenv.sh/languages/
