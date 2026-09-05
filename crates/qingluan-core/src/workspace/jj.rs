@@ -23,6 +23,10 @@ pub fn list_jj_workspaces() -> Result<Vec<RegisteredWorkspace>, WorkspaceError> 
     let output = Command::new("jj")
         .args([
             "--no-pager",
+            // Errors must stay plain regardless of the user's global jj
+            // color config (e.g. ui.color = "always"), since we embed jj's
+            // stderr in machine-readable errors.
+            "--color=never",
             "--ignore-working-copy",
             "workspace",
             "list",
