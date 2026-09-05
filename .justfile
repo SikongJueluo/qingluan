@@ -37,8 +37,13 @@ tauri-dev:
 # Full quality gate — Harness / CI entry point. Non-zero exit on failure.
 quality: quality-rust quality-fe
 
+# Build the frontend bundle so `tauri::generate_context!` (which requires
+# frontendDist to exist) compiles during clippy/test of qingluan-desktop.
+frontend-dist:
+    cd apps/desktop/frontend && bun run build-only
+
 # Rust quality checks (read-only, no file modification)
-quality-rust:
+quality-rust: frontend-dist
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace --all-targets

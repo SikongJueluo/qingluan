@@ -26,6 +26,12 @@ jobs:
         working-directory: apps/desktop/frontend
         run: bun install --frozen-lockfile
 
+      # `tauri::generate_context!` requires frontendDist to exist on disk,
+      # so the bundle must be built before clippy/test compile qingluan-desktop.
+      - name: Build frontend bundle
+        working-directory: apps/desktop/frontend
+        run: bun run build-only
+
       - name: Rust quality
         run: |
           cargo fmt --all -- --check
