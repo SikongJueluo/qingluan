@@ -16,6 +16,15 @@ User  ──▶ Tauri Desktop ──IPC──▶  Tauri Commands (薄封装)
 
 ## CLI (`qingluan`)
 
+命令树每一支都必须有真实可用的实现。当前命令面：
+
+- `health` — daemon 健康检查，始终输出机器可读 JSON（调试命令，无
+  `--json` 开关）
+- `workspace list/open` — 纯本地，不经 daemon（见下）
+
+daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
+占位命令；task 系命令待执行引擎落地后随 daemon 端点一起引入。
+
 - 非交互命令的 stdout = 机器可读 JSON（稳定契约）
 - 唯一例外：`workspace open` 占用终端做交互选择（dialoguer），此时 stdout
   不是机器 JSON；这是 CLI 中唯一的交互式命令
