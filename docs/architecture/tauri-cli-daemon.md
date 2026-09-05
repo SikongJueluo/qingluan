@@ -39,6 +39,11 @@ daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
 
 ### `workspace list [--json]`
 
+- 默认 human 视图：每个 workspace 一个块（bold 名称 + `~` 缩写 root(dim)
+  + 会话数 / 红色 `×` 不可用原因），块内会话行对齐三列（标题、
+  msgs、相对时间 `just now`/`5m ago`/`2d ago`，超过一周显式日期）。
+  对齐按显示宽度计算（CJK 安全，console crate，dialoguer 同源零新增
+  传递依赖）；非 TTY（管道）时自动去色，stdout 仍可安全行处理
 - 在当前目录 shell out `jj workspace list`（`--ignore-working-copy`，
   只读，不 snapshot），模板输出 name/root 流
 - 扫描 `~/.pi/agent/sessions`：与 Pi `listAll` 兼容但保持本地 —— 仅一层

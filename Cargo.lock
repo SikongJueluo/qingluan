@@ -2588,6 +2588,7 @@ name = "qingluan-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "console",
  "dialoguer",
  "qingluan-core",
  "qingluan-protocol",

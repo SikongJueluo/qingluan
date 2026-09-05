@@ -9,6 +9,7 @@ name = "qingluan"
 path = "src/main.rs"
 
 [dependencies]
+console.workspace = true
 clap.workspace = true
 dialoguer.workspace = true
 reqwest.workspace = true

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
+use console::{Alignment, Style, Term, measure_text_width, pad_str, style, truncate_str};
 use dialoguer::{FuzzySelect, theme::ColorfulTheme};
-use qingluan_core::workspace::{WorkspaceCatalog, discover};
+use qingluan_core::workspace::{WorkspaceCatalog, WorkspaceSummary, discover, parse_iso8601_ms};
 use qingluan_protocol::{ApiResponse, HealthResponse};
 use reqwest::Client;
 
@@ -98,6 +100,11 @@ fn cmd_workspace(action: WorkspaceAction) {
     }
 }
 
+/// Width of the right-aligned message-count column in `workspace list`.
+const MSGS_COL: usize = 9;
+/// Width of the right-aligned time column in `workspace list`.
+const TIME_COL: usize = 10;
+
 fn cmd_workspace_list(json: bool) {
     match discover(None) {
         Ok(catalog) => {
@@ -114,20 +121,132 @@ fn cmd_workspace_list(json: bool) {
     }
 }
 
+/// Render the catalog for humans: one block per workspace, header line
+/// (name + root + status), then aligned session rows (title, messages,
+/// relative time). Alignment is display-width aware (CJK safe); ANSI colors
+/// are dropped automatically when stdout is not a TTY.
 fn print_catalog_human(catalog: &WorkspaceCatalog) {
-    for ws in &catalog.workspaces {
-        match &ws.unavailable_reason {
-            Some(reason) => println!("{}\t{}\t(unavailable: {})", ws.name, ws.root, reason),
-            None => println!("{}\t{}\t{} session(s)", ws.name, ws.root, ws.sessions.len()),
+    if catalog.workspaces.is_empty() {
+        println!(
+            "{}",
+            Style::new()
+                .dim()
+                .apply_to("No workspaces registered in this repository.")
+        );
+        return;
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let cols = term_cols();
+    for (i, ws) in catalog.workspaces.iter().enumerate() {
+        if i > 0 {
+            println!();
         }
-        for session in &ws.sessions {
+        print_workspace_block(ws, cols, now_ms);
+    }
+}
+
+/// Print one workspace header plus its session rows.
+fn print_workspace_block(ws: &WorkspaceSummary, cols: usize, now_ms: u64) {
+    let root = tilde(&ws.root, std::env::var("HOME").ok().as_deref());
+    match ws.available {
+        true => {
+            let n = ws.sessions.len();
+            let suffix = match n {
+                0 => "no sessions yet".to_owned(),
+                1 => "1 session".to_owned(),
+                _ => format!("{n} sessions"),
+            };
             println!(
-                "  {}\t{} msgs\t{}",
-                display_title(&session.title, 80),
-                session.message_count,
-                session.modified
+                "{}  {}  {}",
+                style(&ws.name).bold(),
+                style(&root).dim(),
+                style(suffix).dim()
             );
         }
+        false => {
+            let reason = ws.unavailable_reason.as_deref().unwrap_or("unavailable");
+            println!(
+                "{}  {}  {}",
+                style(&ws.name).red().bold(),
+                style(&root).dim(),
+                style(format!("× {reason}")).red()
+            );
+        }
+    }
+
+    // Uniform title column: widest single-line title, clamped to fit the
+    // terminal (indent + title + 2 gaps + msgs + time).
+    let max_title = cols
+        .saturating_sub(2 + MSGS_COL + 2 + TIME_COL + 2)
+        .clamp(16, 60);
+    let rows: Vec<(String, String, String)> = ws
+        .sessions
+        .iter()
+        .map(|s| {
+            (
+                single_line(&s.title),
+                format!("{} msgs", s.message_count),
+                relative_time(&s.modified, now_ms),
+            )
+        })
+        .collect();
+    let title_w = rows
+        .iter()
+        .map(|(title, _, _)| measure_text_width(title))
+        .max()
+        .unwrap_or(0)
+        .min(max_title);
+    for (title, msgs, time) in rows {
+        let title = truncate_str(&title, title_w, "…");
+        let line = format!(
+            "{}  {}  {}",
+            pad_str(&title, title_w, Alignment::Left, None),
+            pad_str(&msgs, MSGS_COL, Alignment::Right, None),
+            pad_str(&time, TIME_COL, Alignment::Right, None),
+        );
+        match ws.available {
+            true => println!("  {line}"),
+            false => println!("{} {}", style("×").red(), style(line).dim()),
+        }
+    }
+}
+
+/// Terminal width in columns; at least 40 when stdout is not a TTY.
+fn term_cols() -> usize {
+    usize::from(Term::stdout().size().1).max(40)
+}
+
+/// Shorten `path` by replacing a home prefix with `~`.
+fn tilde(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home.filter(|h| !h.is_empty()) else {
+        return path.to_owned();
+    };
+    if path == home {
+        return "~".to_owned();
+    }
+    path.strip_prefix(&format!("{home}/"))
+        .map_or_else(|| path.to_owned(), |rest| format!("~/{rest}"))
+}
+
+/// Human-friendly age for a UTC ISO-8601 timestamp.
+///
+/// Relative ("just now", "5m ago", "3h ago", "2d ago") within a week,
+/// then the plain `YYYY-MM-DD` date. Unparseable input falls back to the
+/// first 10 characters (still `YYYY-MM-DD` when well-formed).
+fn relative_time(modified: &str, now_ms: u64) -> String {
+    let Some(ms) = parse_iso8601_ms(modified) else {
+        return modified.get(..10).unwrap_or(modified).to_owned();
+    };
+    let diff_min = now_ms.saturating_sub(ms) / 60_000;
+    match diff_min {
+        0..=1 => "just now".to_owned(),
+        2..=59 => format!("{diff_min}m ago"),
+        60..=1_439 => format!("{}h ago", diff_min / 60),
+        1_440..=10_079 => format!("{}d ago", diff_min / 1_440),
+        _ => modified.get(..10).unwrap_or(modified).to_owned(),
     }
 }
 
@@ -262,15 +381,17 @@ fn unique_label(seen: &mut HashMap<String, u32>, label: String) -> String {
 /// Titles fall back to the first user message, which can be a whole
 /// document; the selector stays usable with a truncated single line.
 fn display_title(title: &str, max_chars: usize) -> String {
-    let single_line = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    if single_line.chars().count() <= max_chars {
-        return single_line;
+    let single = single_line(title);
+    if single.chars().count() <= max_chars {
+        return single;
     }
-    let head: String = single_line
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect();
+    let head: String = single.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{head}…")
+}
+
+/// Collapse whitespace (incl. newlines) into single spaces.
+fn single_line(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Launch `pi` in the workspace root, resuming `--session <file>` when given.
@@ -336,6 +457,34 @@ mod tests {
             unavailable_reason: reason.map(str::to_owned),
             sessions,
         }
+    }
+
+    #[test]
+    fn relative_time_buckets() {
+        let now = 1_786_877_734_971u64; // 2026-08-16T10:55:34.971Z
+        assert_eq!(relative_time("2026-08-16T10:55:34.971Z", now), "just now");
+        assert_eq!(relative_time("2026-08-16T10:50:34.971Z", now), "5m ago");
+        assert_eq!(relative_time("2026-08-16T07:55:34.971Z", now), "3h ago");
+        assert_eq!(relative_time("2026-08-14T10:55:34.971Z", now), "2d ago");
+        // Beyond a week: plain date, even when parseable.
+        assert_eq!(relative_time("2026-07-30T10:55:34.971Z", now), "2026-07-30");
+        // Unparseable input: first 10 chars.
+        assert_eq!(relative_time("garbage-long", now), "garbage-lo");
+        // Clock skew (future timestamp): clamp to just now.
+        assert_eq!(relative_time("2026-08-16T11:00:00.000Z", now), "just now");
+    }
+
+    #[test]
+    fn tilde_shortens_home_prefix_only() {
+        assert_eq!(
+            tilde("/home/me/Projects/qingluan", Some("/home/me")),
+            "~/Projects/qingluan"
+        );
+        assert_eq!(tilde("/home/me", Some("/home/me")), "~");
+        // Prefix must be a path boundary, not a string prefix.
+        assert_eq!(tilde("/home/metal/x", Some("/home/me")), "/home/metal/x");
+        assert_eq!(tilde("/opt/other", Some("/home/me")), "/opt/other");
+        assert_eq!(tilde("/home/me/x", None), "/home/me/x");
     }
 
     #[test]
