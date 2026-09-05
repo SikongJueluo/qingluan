@@ -1,11 +1,15 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use console::{Alignment, Style, Term, measure_text_width, pad_str, style, truncate_str};
-use dialoguer::{FuzzySelect, theme::ColorfulTheme};
-use qingluan_core::workspace::{WorkspaceCatalog, WorkspaceSummary, discover, parse_iso8601_ms};
+use dialoguer::{Confirm, FuzzySelect, theme::ColorfulTheme};
+use qingluan_core::workspace::{
+    WorkspaceCatalog, WorkspaceSummary, add_workspace, discover, forget_workspace, jj_root,
+    list_jj_workspaces, parse_iso8601_ms, workspace_clean,
+};
 use qingluan_protocol::{ApiResponse, HealthResponse};
 use reqwest::Client;
 
@@ -48,6 +52,48 @@ enum WorkspaceAction {
 
     /// Interactively open a Pi session in one of the workspaces.
     Open,
+
+    /// Create a workspace (wraps `jj workspace add`).
+    ///
+    /// Destination defaults to <workspace root>/<repo name>/<name>; the
+    /// root comes from the Qingluan config ([workspace] root, default
+    /// ~/Projects/.workspace).
+    Add {
+        /// Workspace name (also the destination directory name).
+        name: String,
+
+        /// Parent revisions for the new working-copy commit (jj revset).
+        #[arg(long)]
+        revision: Option<String>,
+
+        /// Explicit destination path (overrides the default layout).
+        #[arg(long)]
+        at: Option<PathBuf>,
+
+        /// Output as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop tracking a workspace (wraps `jj workspace forget`).
+    ///
+    /// The workspace directory is kept on disk unless --purge is given.
+    Remove {
+        /// Workspace name to forget.
+        name: String,
+
+        /// Also delete the workspace directory (default: forget only).
+        #[arg(long)]
+        purge: bool,
+
+        /// Skip the dirty-check and the confirmation for --purge.
+        #[arg(long)]
+        force: bool,
+
+        /// Output as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -108,7 +154,236 @@ fn cmd_workspace(action: WorkspaceAction) {
     match action {
         WorkspaceAction::List { json } => cmd_workspace_list(json),
         WorkspaceAction::Open => cmd_workspace_open(),
+        WorkspaceAction::Add {
+            name,
+            revision,
+            at,
+            json,
+        } => cmd_workspace_add(&name, revision.as_deref(), at, json),
+        WorkspaceAction::Remove {
+            name,
+            purge,
+            force,
+            json,
+        } => cmd_workspace_remove(&name, purge, force, json),
     }
+}
+
+/// `workspace add`: pre-check, place the destination, delegate to jj.
+fn cmd_workspace_add(name: &str, revision: Option<&str>, at: Option<PathBuf>, json: bool) {
+    let config = qingluan_config::load().unwrap_or_else(|e| machine_error("config_invalid", e));
+
+    let registered = list_jj_workspaces().unwrap_or_else(|e| machine_error(e.code(), e));
+    if registered.iter().any(|ws| ws.name == name) {
+        machine_error(
+            "workspace_exists",
+            format!("workspace named '{name}' already exists in this repository"),
+        );
+    }
+
+    let repo_root = jj_root().unwrap_or_else(|e| machine_error(e.code(), e));
+    let destination = compute_destination(&config.workspace.root, &repo_root, name, at.as_deref());
+
+    // Parent directories are ours to create; the destination itself must be
+    // an empty (or absent) directory — jj rejects non-empty ones, but we
+    // pre-check to keep the error structured.
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+            machine_error(
+                "mkdir_failed",
+                format!("failed to create {}: {e}", parent.display()),
+            )
+        });
+    }
+    if destination.is_dir() {
+        let empty = std::fs::read_dir(&destination).is_ok_and(|mut d| d.next().is_none());
+        if !empty {
+            machine_error(
+                "destination_not_empty",
+                format!(
+                    "destination {} exists and is not empty",
+                    destination.display()
+                ),
+            );
+        }
+    } else if destination.exists() {
+        machine_error(
+            "destination_not_empty",
+            format!(
+                "destination {} exists and is not a directory",
+                destination.display()
+            ),
+        );
+    } else {
+        std::fs::create_dir(&destination).unwrap_or_else(|e| {
+            machine_error(
+                "mkdir_failed",
+                format!("failed to create {}: {e}", destination.display()),
+            )
+        });
+    }
+
+    let revisions: Vec<String> = revision.map(|r| vec![r.to_owned()]).unwrap_or_default();
+    add_workspace(&destination, name, &revisions).unwrap_or_else(|e| machine_error(e.code(), e));
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "name": name,
+                "root": destination,
+                "revision": revision,
+            })
+        );
+    } else {
+        println!(
+            "added workspace {} at {}",
+            style(name).bold(),
+            destination.display()
+        );
+        println!(
+            "{}",
+            style(format!(
+                "cd {} or: qingluan workspace open",
+                destination.display()
+            ))
+            .dim()
+        );
+    }
+}
+
+/// `workspace remove`: forget via jj; optionally purge the directory with
+/// a dirty-check and confirmation. Never touches ~/.pi.
+#[allow(clippy::too_many_arguments)]
+fn cmd_workspace_remove(name: &str, purge: bool, force: bool, json: bool) {
+    let registered = list_jj_workspaces().unwrap_or_else(|e| machine_error(e.code(), e));
+    // jj forget exits 0 even for unknown names — pre-check for a clean error.
+    let Some(ws) = registered.iter().find(|ws| ws.name == name) else {
+        machine_error(
+            "workspace_not_found",
+            format!("no workspace named '{name}' in this repository"),
+        );
+    };
+    let root = PathBuf::from(&ws.root);
+
+    // Informational: associated Pi sessions drop out of `workspace list`
+    // once the workspace is forgotten (files stay under ~/.pi, untouched).
+    let sessions_affected = discover(None)
+        .ok()
+        .and_then(|catalog| {
+            catalog
+                .workspaces
+                .into_iter()
+                .find(|w| w.name == name)
+                .map(|w| w.sessions.len())
+        })
+        .unwrap_or(0);
+
+    let mut warnings: Vec<String> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir()
+        && cwd.starts_with(&root)
+    {
+        warnings.push("you are inside the removed workspace; cd away".to_owned());
+    }
+
+    if purge {
+        // The dirty-check lets jj snapshot the working copy, so uncommitted
+        // changes are actually observed (an --ignore-working-copy probe
+        // would always report clean).
+        let clean = workspace_clean(&root).unwrap_or_else(|e| machine_error(e.code(), e));
+        if !clean && !force {
+            machine_error(
+                "workspace_dirty",
+                format!("workspace '{name}' has uncommitted changes; use --force to purge anyway"),
+            );
+        }
+        if !force {
+            if json {
+                machine_error(
+                    "confirmation_required",
+                    "--purge with --json requires --force (no interactive confirmation)",
+                );
+            }
+            let confirmed = Confirm::new()
+                .with_prompt(format!("Remove {} and all its contents?", root.display()))
+                .interact_opt()
+                .unwrap_or(None);
+            if confirmed != Some(true) {
+                std::process::exit(0); // cancelled, not an error
+            }
+        }
+    }
+
+    forget_workspace(name).unwrap_or_else(|e| machine_error(e.code(), e));
+
+    if purge {
+        std::fs::remove_dir_all(&root).unwrap_or_else(|e| {
+            machine_error(
+                "purge_failed",
+                format!(
+                    "workspace forgotten, but directory {} could not be removed: {e}",
+                    root.display()
+                ),
+            )
+        });
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "name": name,
+                "purged": purge,
+                "sessionsAffected": sessions_affected,
+                "warnings": warnings,
+            })
+        );
+    } else {
+        println!("removed workspace {}", style(name).bold());
+        if purge {
+            println!("{}", style("workspace directory deleted").dim());
+        } else {
+            println!(
+                "{}",
+                style(format!(
+                    "directory kept at {} (delete manually if unwanted)",
+                    root.display()
+                ))
+                .dim()
+            );
+        }
+        if sessions_affected > 0 {
+            println!(
+                "{}",
+                style(format!(
+                    "{sessions_affected} Pi session(s) no longer listed (files kept under ~/.pi)"
+                ))
+                .dim()
+            );
+        }
+        for warning in warnings {
+            println!("{}", style(warning).red());
+        }
+    }
+}
+
+/// Destination layout for `workspace add`:
+/// explicit `--at` wins, else `<config root>/<repo directory name>/<name>`.
+fn compute_destination(
+    config_root: &Path,
+    repo_root: &Path,
+    name: &str,
+    at: Option<&Path>,
+) -> PathBuf {
+    at.map(Path::to_path_buf).unwrap_or_else(|| {
+        let repo_name = repo_root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("repo");
+        config_root.join(repo_name).join(name)
+    })
 }
 
 /// Width of the right-aligned message-count column in `workspace list`.
@@ -468,6 +743,28 @@ mod tests {
             unavailable_reason: reason.map(str::to_owned),
             sessions,
         }
+    }
+
+    #[test]
+    fn destination_defaults_to_config_layout_and_at_overrides() {
+        assert_eq!(
+            compute_destination(
+                Path::new("/ws"),
+                Path::new("/home/me/Projects/qingluan"),
+                "fix",
+                None
+            ),
+            PathBuf::from("/ws/qingluan/fix")
+        );
+        assert_eq!(
+            compute_destination(
+                Path::new("/ws"),
+                Path::new("/home/me/Projects/qingluan"),
+                "fix",
+                Some(Path::new("/elsewhere/x"))
+            ),
+            PathBuf::from("/elsewhere/x")
+        );
     }
 
     #[test]

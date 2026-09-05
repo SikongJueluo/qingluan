@@ -14,7 +14,10 @@ pub use associate::association_key;
 pub use catalog::{
     RegisteredWorkspace, SessionSummary, WorkspaceCatalog, WorkspaceSummary, build_catalog,
 };
-pub use jj::{WORKSPACE_LIST_TEMPLATE, list_jj_workspaces, parse_workspace_list_output};
+pub use jj::{
+    WORKSPACE_LIST_TEMPLATE, add_workspace, forget_workspace, jj_root, list_jj_workspaces,
+    parse_workspace_list_output, workspace_clean,
+};
 pub use pi_sessions::{ScannedSession, scan_sessions_root, summarize_session_lines};
 pub use time::{format_iso8601_ms, parse_iso8601_ms};
 

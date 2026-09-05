@@ -37,6 +37,29 @@ daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
 `workspace` 模块，深模块：JJ workspace 枚举 + Pi session JSONL 扫描 +
 路径关联）。
 
+### `workspace add <name> [--revision REV] [--at <path>] [--json]`
+
+封装 `jj workspace add`，消除长路径记忆：
+
+- 默认落点 `<[workspace] root>/<repo 目录名>/<name>`（config 层级见
+  「配置」节）；`--at` 显式覆盖；`--revision` 透传
+- 预检：名字已注册 → `workspace_exists`；目标目录非空 →
+  `destination_not_empty`；父目录自动创建，空目标目录放行
+- human 输出一行结果 + cd 提示；`--json` 输出 name/root/revision；
+  不自动启动 pi（那是 `workspace open` 的职责）
+
+### `workspace remove <name> [--purge] [--force] [--json]`
+
+封装 `jj workspace forget`（目录不动），`--purge` 才删目录：
+
+- 预检：未知名 → `workspace_not_found`（jj 对未知名静默 exit 0，必须预检）
+- 脏检测（`jj -R <root> log -r @ -T empty`，需 snapshot，无
+  `--ignore-working-copy`）：有未提交变更时 `--purge` 拒绝，`--force` 放行
+- `--purge` 交互确认；`--json` 模式无交互 → 必须 `--force`
+- forget 前提示关联 Pi 会话数（文件永不触碰 `~/.pi`）；当前 cwd 在
+  被删目录内时警告 cd away；先 forget 后删目录，删失败如实报
+  `purge_failed`
+
 ### `workspace list [--json]`
 
 - 默认 human 视图：每个 workspace 一个块（bold 名称 + `~` 缩写 root(dim)

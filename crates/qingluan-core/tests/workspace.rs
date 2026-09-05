@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use qingluan_core::workspace::{
-    self, WorkspaceError, build_catalog, discover, parse_workspace_list_output, scan_sessions_root,
-    summarize_session_lines,
+    self, WorkspaceError, add_workspace, build_catalog, discover, forget_workspace, jj_root,
+    list_jj_workspaces, parse_workspace_list_output, scan_sessions_root, summarize_session_lines,
+    workspace_clean,
 };
 
 fn lines_of(chunks: &[&str]) -> Vec<Result<String, std::io::Error>> {
@@ -553,4 +554,61 @@ impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+// ── workspace add / forget / clean (real jj) ──────────────────────────────
+
+#[test]
+fn add_forget_and_clean_roundtrip_with_real_jj() {
+    if !jj_available() {
+        eprintln!("skipping: jj not in PATH");
+        return;
+    }
+    let tmp = tempdir();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    jj(&["git", "init", "repo"], tmp.path());
+
+    let _guard = CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let saved = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&repo).unwrap();
+
+    // Fresh repo working copy is clean, and jj_root reports the repo.
+    assert!(workspace_clean(&repo).unwrap());
+    assert_eq!(jj_root().unwrap(), repo);
+
+    // add: an existing empty destination is accepted.
+    let dest = tmp.path().join("ws-a");
+    fs::create_dir_all(&dest).unwrap();
+    add_workspace(&dest, "ws-a", &[]).unwrap();
+    assert!(
+        list_jj_workspaces()
+            .unwrap()
+            .iter()
+            .any(|w| w.name == "ws-a")
+    );
+
+    // Duplicate names surface jj's error as JjCommandFailed.
+    let dest2 = tmp.path().join("ws-b");
+    fs::create_dir_all(&dest2).unwrap();
+    let err = add_workspace(&dest2, "ws-a", &[]).unwrap_err();
+    assert!(matches!(err, WorkspaceError::JjCommandFailed { .. }));
+    assert!(err.to_string().contains("already exists"));
+
+    // Dirty detection: an unsaved edit is observed because the probe
+    // snapshots the working copy.
+    fs::write(repo.join("dirty.txt"), "x").unwrap();
+    assert!(!workspace_clean(&repo).unwrap());
+
+    // forget removes the registration; jj exits 0 for unknown names too
+    // (callers pre-check), which is documented behavior.
+    forget_workspace("ws-a").unwrap();
+    assert!(
+        !list_jj_workspaces()
+            .unwrap()
+            .iter()
+            .any(|w| w.name == "ws-a")
+    );
+
+    std::env::set_current_dir(saved).unwrap();
 }
