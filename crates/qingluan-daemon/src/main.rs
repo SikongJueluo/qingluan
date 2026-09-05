@@ -5,26 +5,9 @@ use axum::{
     routing::{get, post},
 };
 use qingluan_protocol::{ApiResponse, CreateTaskRequest, HealthResponse, TaskEvent, TaskId};
-use serde::Deserialize;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
-
-/// Daemon configuration.
-#[derive(Debug, Clone, Deserialize)]
-struct DaemonConfig {
-    host: String,
-    port: u16,
-}
-
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            host: "127.0.0.1".into(),
-            port: 47129,
-        }
-    }
-}
 
 /// Shared application state.
 #[derive(Clone)]
@@ -36,11 +19,18 @@ struct AppState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let config = DaemonConfig::default();
+    // Hard-fail on malformed config: silently falling back to defaults
+    // would mask typos (see qingluan-config crate docs).
+    let config = match qingluan_config::load() {
+        Ok(config) => config.daemon,
+        Err(e) => {
+            tracing::error!("invalid configuration: {e}");
+            std::process::exit(1);
+        }
+    };
     let state = AppState {
         version: qingluan_core::version().to_string(),
     };
-
     let app = Router::new()
         .route("/health", get(health))
         .route("/tasks", post(create_task))

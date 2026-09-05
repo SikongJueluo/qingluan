@@ -16,5 +16,6 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+qingluan-config = { path = "../qingluan-config" }
 qingluan-core = { path = "../qingluan-core" }
 qingluan-protocol = { path = "../qingluan-protocol" }

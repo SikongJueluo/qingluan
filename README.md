@@ -28,7 +28,9 @@ qingluan workspace list    # workspace 列表
 qingluan-desktop           # 桌面端
 ```
 
-配置见 [`config/qingluan.example.toml`](config/qingluan.example.toml)，CLI 可用 `--daemon-url` 覆盖。
+配置见 [`config/qingluan.example.toml`](config/qingluan.example.toml)。四层合并
+（内置默认 < `~/.config/qingluan/config.toml` < 项目根 `qingluan.toml` < `QINGLUAN_*` 环境变量），
+CLI 可用 `--daemon-url` 覆盖；配置文件损坏时硬失败不静默降级。
 
 ## 开发
 

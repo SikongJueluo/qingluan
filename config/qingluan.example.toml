@@ -1,14 +1,35 @@
-# Qingluan daemon configuration example.
-# Copy to ~/.config/qingluan/config.toml and adjust.
+# Qingluan configuration example.
+#
+# Layers (later wins):
+#   1. built-in defaults (see below)
+#   2. global file:  ~/.config/qingluan/config.toml   ($XDG_CONFIG_HOME honored)
+#   3. project file: ./qingluan.toml                  (current directory only)
+#   4. environment:  QINGLUAN_*                       (nested keys use "__",
+#                    e.g. QINGLUAN_DAEMON__PORT=47200)
+#
+# Missing files fall through to defaults. Malformed files, unknown keys, or
+# wrong types are hard errors — typos never silently do nothing.
+
+[workspace]
+# Root directory for `qingluan workspace add` destinations:
+#   <root>/<repo-name>/<workspace-name>
+# A leading "~" expands to the user's home directory.
+# Consumed by: qingluan workspace add
+root = "~/Projects/.workspace"   # ← built-in default
 
 [daemon]
+# Listen address. Consumed by: qingluan-daemon (bind) and qingluan health
+# (default --daemon-url).
 host = "127.0.0.1"
 port = 47129
 
 [sandbox]
+# NOT yet consumed — schema reserved for the task execution engine.
 provider = "local"
+# template = "qingluan-dev"
 
 [cube]
-endpoint = "http://127.0.0.1:8000"
-api_key = "env:CUBE_API_KEY"
-template = "qingluan-dev"
+# NOT yet consumed — schema reserved for the task execution engine.
+# endpoint = "http://127.0.0.1:8000"
+# api_key = "env:CUBE_API_KEY"
+# template = "qingluan-dev"

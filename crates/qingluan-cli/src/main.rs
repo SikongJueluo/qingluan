@@ -9,8 +9,6 @@ use qingluan_core::workspace::{WorkspaceCatalog, WorkspaceSummary, discover, par
 use qingluan_protocol::{ApiResponse, HealthResponse};
 use reqwest::Client;
 
-const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:47129";
-
 /// Qingluan CLI — stable agent entry point for the Qingluan task platform.
 ///
 /// Every command here is backed by a working implementation; task-related
@@ -21,9 +19,10 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Daemon base URL (default: http://127.0.0.1:47129).
-    #[arg(long, global = true, default_value = DEFAULT_DAEMON_URL)]
-    daemon_url: String,
+    /// Daemon base URL (default: http://<daemon.host>:<daemon.port> from
+    /// the Qingluan config).
+    #[arg(long, global = true)]
+    daemon_url: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -57,12 +56,24 @@ async fn main() {
 
     match cli.command {
         Commands::Health => {
-            cmd_health(&cli.daemon_url).await;
+            let daemon_url = resolve_daemon_url(cli.daemon_url.as_deref());
+            cmd_health(&daemon_url).await;
         }
         Commands::Workspace { action } => {
+            // No config consumption here: workspace list/open must keep
+            // working when the config file is broken.
             cmd_workspace(action);
         }
     }
+}
+
+/// Explicit `--daemon-url`, else `http://<host>:<port>` from the loaded
+/// config. Malformed config is a hard error (never silent defaults).
+fn resolve_daemon_url(daemon_url: Option<&str>) -> String {
+    daemon_url.map(str::to_owned).unwrap_or_else(|| {
+        let config = qingluan_config::load().unwrap_or_else(|e| machine_error("config_invalid", e));
+        format!("http://{}:{}", config.daemon.host, config.daemon.port)
+    })
 }
 
 /// Print a machine-readable error to stderr and exit nonzero.

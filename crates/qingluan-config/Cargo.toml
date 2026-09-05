@@ -1,0 +1,13 @@
+[package]
+name = "qingluan-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dirs.workspace = true
+figment.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

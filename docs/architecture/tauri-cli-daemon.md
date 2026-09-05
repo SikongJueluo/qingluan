@@ -92,8 +92,21 @@ daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
 
 ## Daemon (`qingluan-daemon`)
 
-- 本地 HTTP 服务（默认 `127.0.0.1:47129`）
+- 本地 HTTP 服务，监听地址来自 [`qingluan-config`](#配置-qingluan-config)
+  （默认 `127.0.0.1:47129`；配置损坏时启动即硬失败）
 - Axum 路由：`/health`, `/tasks`, `/tasks/:id`, `/tasks/:id/events`, `/sandboxes`
+
+## 配置 (`qingluan-config`)
+
+- 四层合并，后者覆盖前者：内置默认 < 全局
+  `~/.config/qingluan/config.toml` < 项目当前目录 `qingluan.toml` <
+  env `QINGLUAN_*`（嵌套键双下划线，如 `QINGLUAN_DAEMON__PORT`）
+- figment + dirs 实现；serde 派生配置结构，`deny_unknown_fields`
+  开启——未知键/段/类型错误全部硬失败（静默降级 = 配置漂移温床）
+- v1 键集：`[workspace] root`（workspace add 默认落点，`~` 展开）与
+  `[daemon] host/port`（daemon 绑定 + CLI 默认 --daemon-url，已消费）；
+  `[sandbox]`/`[cube]` 仅定 schema 待执行引擎消费
+- 示例见 `config/qingluan.example.toml`
 
 ## Tauri Desktop
 

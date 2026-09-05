@@ -17,6 +17,7 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-qingluan-protocol = { path = "../qingluan-protocol" }
+qingluan-config = { path = "../qingluan-config" }
 qingluan-core = { path = "../qingluan-core" }
+qingluan-protocol = { path = "../qingluan-protocol" }
 qingluan-sandbox = { path = "../qingluan-sandbox" }
