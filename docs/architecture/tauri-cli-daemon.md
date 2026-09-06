@@ -85,16 +85,18 @@ daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
 
 ### `workspace open`（交互式终端例外）
 
-这是 CLI 中唯一的交互式命令，直接占用终端：
+这是 CLI 中唯一的交互式命令，直接占用终端，两级 dialoguer
+`FuzzySelect`：
 
-- dialoguer `FuzzySelect` 扁平选择器：每个可用 workspace 列出其会话
-  （`name ── title (N msgs, modified)`，标题截断单行，标签全局去重）
-  与一条 `✚ new session`
-- 不可用 workspace 的历史 session 各占一行 `name ── × title […]`，便于
-  识别和未来迁移；若没有历史 session，workspace 本身占一行。缺失的 root
-  无法承载启动，因此这些行仅提供信息
-- 选中 `×` 行：仅在 stderr 打印原因并重新打开选择器（不退出、不报错）；
-  Esc 退出码 0（取消不是错误）
+- 第一级选 workspace：名称列对齐 + `~` 缩写 root(dim) + 会话数；不可用
+  workspace 显示 `× 原因`，选中仅在 stderr 打印原因并重开选择器
+  （不退出、不报错），其历史 session 不再展开成行
+- 第二级只列选中 workspace 的会话：与 `workspace list` 相同的对齐三列
+  （标题、msgs、相对时间）加一条 `✚ new session`；Esc 返回第一级，
+  第一级 Esc 退出码 0（取消不是错误）
+- 两级均设 `.max_length` 分页（未分页时列表超过终端高度会逐键整屏
+  重绘——频闪），行按终端宽度截断（折行会破坏 dialoguer 的重绘行数
+  计算）；重复行加 `[#n]` 后缀消歧
 - 选中后以目标 workspace root 为 `current_dir` 启动子进程 `pi`：
   resume 传 `--session <file>`，new 不带参数；子进程退出码即退出码
 

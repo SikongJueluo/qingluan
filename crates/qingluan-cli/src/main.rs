@@ -7,8 +7,8 @@ use clap::{Parser, Subcommand};
 use console::{Alignment, Style, Term, measure_text_width, pad_str, style, truncate_str};
 use dialoguer::{Confirm, FuzzySelect, theme::ColorfulTheme};
 use qingluan_core::workspace::{
-    WorkspaceCatalog, WorkspaceSummary, add_workspace, discover, forget_workspace, jj_root,
-    list_jj_workspaces, parse_iso8601_ms, workspace_clean,
+    SessionSummary, WorkspaceCatalog, WorkspaceSummary, add_workspace, discover, forget_workspace,
+    jj_root, list_jj_workspaces, parse_iso8601_ms, workspace_clean,
 };
 use qingluan_protocol::{ApiResponse, HealthResponse};
 use reqwest::Client;
@@ -138,17 +138,19 @@ fn machine_error(code: &str, message: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-/// One selectable entry of `workspace open`.
+/// One selectable entry of the level-2 session selector.
 #[derive(Debug, Clone, PartialEq)]
 enum SessionChoice {
-    /// Start a fresh Pi session in this workspace root.
-    New { root: String },
-    /// Resume this Pi session file in its workspace root.
-    Resume { root: String, file: String },
-    /// Informational row for an unavailable workspace/session: selecting it
-    /// only prints the reason and reopens the selector.
-    Unavailable { name: String, reason: String },
+    /// Start a fresh Pi session in the selected workspace.
+    New,
+    /// Resume this Pi session file in the selected workspace.
+    Resume { file: String },
 }
+
+/// Visible-row cap for the interactive fuzzy selectors. Unbounded lists
+/// repaint the whole screen on every keystroke (flickering once they exceed
+/// the terminal height), so selectors stay paginated.
+const SELECTOR_MAX_ROWS: usize = 15;
 
 fn cmd_workspace(action: WorkspaceAction) {
     match action {
@@ -421,10 +423,7 @@ fn print_catalog_human(catalog: &WorkspaceCatalog) {
         );
         return;
     }
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now_ms = unix_now_ms();
     let cols = term_cols();
     for (i, ws) in catalog.workspaces.iter().enumerate() {
         if i > 0 {
@@ -465,9 +464,7 @@ fn print_workspace_block(ws: &WorkspaceSummary, cols: usize, now_ms: u64) {
 
     // Uniform title column: widest single-line title, clamped to fit the
     // terminal (indent + title + 2 gaps + msgs + time).
-    let max_title = cols
-        .saturating_sub(2 + MSGS_COL + 2 + TIME_COL + 2)
-        .clamp(16, 60);
+    let max_title = title_col_width(cols);
     let rows: Vec<(String, String, String)> = ws
         .sessions
         .iter()
@@ -498,6 +495,21 @@ fn print_workspace_block(ws: &WorkspaceSummary, cols: usize, now_ms: u64) {
             false => println!("{} {}", style("×").red(), style(line).dim()),
         }
     }
+}
+
+/// Title-column budget: terminal width minus the fixed columns (indent,
+/// gaps, msgs, time), clamped to a readable range.
+fn title_col_width(cols: usize) -> usize {
+    cols.saturating_sub(2 + MSGS_COL + 2 + TIME_COL + 2)
+        .clamp(16, 60)
+}
+
+/// Current unix time in milliseconds (0 on clock skew).
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Terminal width in columns; at least 40 when stdout is not a TTY.
@@ -536,118 +548,152 @@ fn relative_time(modified: &str, now_ms: u64) -> String {
     }
 }
 
+/// `workspace open`: two-level interactive flow. Level 1 picks a
+/// workspace, level 2 picks one of that workspace's sessions (or a new
+/// one); a flat all-sessions list grows past the terminal and flickers.
 fn cmd_workspace_open() {
     let catalog = match discover(None) {
         Ok(catalog) => catalog,
         Err(e) => machine_error(e.code(), e),
     };
-
-    let (labels, choices) = build_session_choices(&catalog);
-    if labels.is_empty() {
+    if catalog.workspaces.is_empty() {
         machine_error(
             "no_workspaces",
             "no workspace registered in this repository",
         );
     }
 
+    let ws_labels = workspace_labels(&catalog.workspaces, std::env::var("HOME").ok().as_deref());
     loop {
-        let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Open a Pi session")
-            .items(&labels)
-            .default(0)
-            .interact_opt();
-
-        let index = match selection {
-            Ok(Some(index)) => index,
+        // Level 1: pick a workspace.
+        let index = match select(&ws_labels, "Select a workspace") {
+            Some(index) => index,
             // Esc / q: cancelled, not an error.
-            Ok(None) => std::process::exit(0),
-            Err(e) => machine_error("selector_failed", e),
+            None => std::process::exit(0),
         };
+        let ws = &catalog.workspaces[index];
 
-        match &choices[index] {
-            // Informational row: show why the workspace is unusable, then
-            // reopen the selector so the user can pick something else.
-            SessionChoice::Unavailable { name, reason } => {
-                eprintln!("× {name}: {reason}");
-                continue;
-            }
-            SessionChoice::New { root } => launch_pi(root, &[]),
-            SessionChoice::Resume { root, file } => launch_pi(root, &["--session", file]),
+        // Unavailable roots cannot host Pi; keep the reason visible, retry.
+        if !ws.available {
+            let reason = ws.unavailable_reason.as_deref().unwrap_or("unavailable");
+            eprintln!("× {}: {reason}", ws.name);
+            continue;
+        }
+
+        // Level 2: pick a session within the workspace.
+        match choose_session(ws) {
+            SessionPick::Cancelled => continue, // Esc: back to level 1.
+            SessionPick::New => launch_pi(&ws.root, &[]),
+            SessionPick::Resume { file } => launch_pi(&ws.root, &["--session", &file]),
         }
     }
 }
 
-/// Build the flat selector labels and their choices for `workspace open`.
-///
-/// Available workspaces contribute their sessions plus one `✚ new session`
-/// entry. An unavailable workspace contributes one informational row per
-/// known session so its history remains discoverable; if it has no sessions,
-/// the workspace itself contributes one row. None can launch Pi while the
-/// root is missing. Labels are globally unique.
-fn build_session_choices(catalog: &WorkspaceCatalog) -> (Vec<String>, Vec<SessionChoice>) {
+/// Outcome of the level-2 session selector.
+enum SessionPick {
+    /// Esc / q: return to the workspace selector.
+    Cancelled,
+    /// Start a fresh Pi session.
+    New,
+    /// Resume this session file.
+    Resume { file: String },
+}
+
+/// Level-2 selector: one workspace's sessions plus `✚ new session`.
+fn choose_session(ws: &WorkspaceSummary) -> SessionPick {
+    let (labels, choices) = session_choices(&ws.sessions, term_cols(), unix_now_ms());
+    let prompt = format!("{}: pick a session (Esc: back)", ws.name);
+    match select(&labels, &prompt).map(|index| &choices[index]) {
+        Some(SessionChoice::New) => SessionPick::New,
+        Some(SessionChoice::Resume { file }) => SessionPick::Resume { file: file.clone() },
+        None => SessionPick::Cancelled,
+    }
+}
+
+/// Run one fuzzy-select round; `None` = cancelled (Esc / q).
+fn select(labels: &[String], prompt: &str) -> Option<usize> {
+    FuzzySelect::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .items(labels)
+        .default(0)
+        .max_length(SELECTOR_MAX_ROWS)
+        .interact_opt()
+        .unwrap_or_else(|e| machine_error("selector_failed", e))
+}
+
+/// Level-1 selector labels: one row per workspace, name column aligned,
+/// session count (or the unavailable reason) on the right.
+fn workspace_labels(workspaces: &[WorkspaceSummary], home: Option<&str>) -> Vec<String> {
+    let name_w = workspaces
+        .iter()
+        .map(|ws| measure_text_width(&ws.name))
+        .max()
+        .unwrap_or(0);
+    workspaces
+        .iter()
+        .map(|ws| {
+            let name = pad_str(&ws.name, name_w, Alignment::Left, None);
+            let root = tilde(&ws.root, home);
+            if ws.available {
+                let suffix = match ws.sessions.len() {
+                    0 => "no sessions".to_owned(),
+                    1 => "1 session".to_owned(),
+                    n => format!("{n} sessions"),
+                };
+                format!("{name}  {root}  {suffix}")
+            } else {
+                let reason = ws.unavailable_reason.as_deref().unwrap_or("unavailable");
+                format!("{name}  {root}  × {reason}")
+            }
+        })
+        .collect()
+}
+
+/// Level-2 selector rows for one workspace: aligned three-column session
+/// lines (title, msgs, relative time) plus a trailing `✚ new session`
+/// entry. Rows fit the terminal width (wrapping breaks dialoguer's repaint
+/// math); duplicate rows get `[#n]` suffixes.
+fn session_choices(
+    sessions: &[SessionSummary],
+    cols: usize,
+    now_ms: u64,
+) -> (Vec<String>, Vec<SessionChoice>) {
+    let title_w = sessions
+        .iter()
+        .map(|s| measure_text_width(&single_line(&s.title)))
+        .max()
+        .unwrap_or(0)
+        .min(title_col_width(cols));
+
+    let mut seen: HashMap<String, u32> = HashMap::new();
     let mut labels: Vec<String> = Vec::new();
     let mut choices: Vec<SessionChoice> = Vec::new();
-    let mut seen: HashMap<String, u32> = HashMap::new();
-    for ws in &catalog.workspaces {
-        if !ws.available {
-            let reason = ws
-                .unavailable_reason
-                .clone()
-                .unwrap_or_else(|| "unavailable".to_owned());
-            if ws.sessions.is_empty() {
-                labels.push(unique_label(
-                    &mut seen,
-                    format!("{} ── × {}", ws.name, reason),
-                ));
-                choices.push(SessionChoice::Unavailable {
-                    name: ws.name.clone(),
-                    reason,
-                });
-            } else {
-                for session in &ws.sessions {
-                    labels.push(unique_label(
-                        &mut seen,
-                        format!(
-                            "{} ── × {} ({} msgs, {}) [{}]",
-                            ws.name,
-                            display_title(&session.title, 80),
-                            session.message_count,
-                            session.modified,
-                            reason
-                        ),
-                    ));
-                    choices.push(SessionChoice::Unavailable {
-                        name: ws.name.clone(),
-                        reason: reason.clone(),
-                    });
-                }
-            }
-            continue;
-        }
-        for session in &ws.sessions {
-            labels.push(unique_label(
-                &mut seen,
-                format!(
-                    "{} ── {} ({} msgs, {})",
-                    ws.name,
-                    display_title(&session.title, 80),
-                    session.message_count,
-                    session.modified
-                ),
-            ));
-            choices.push(SessionChoice::Resume {
-                root: ws.root.clone(),
-                file: session.file.clone(),
-            });
-        }
-        labels.push(unique_label(
-            &mut seen,
-            format!("{} ── ✚ new session", ws.name),
-        ));
-        choices.push(SessionChoice::New {
-            root: ws.root.clone(),
+    for session in sessions {
+        let single = single_line(&session.title);
+        let title = truncate_str(&single, title_w, "…");
+        let row = format!(
+            "{}  {}  {}",
+            pad_str(&title, title_w, Alignment::Left, None),
+            pad_str(
+                &format!("{} msgs", session.message_count),
+                MSGS_COL,
+                Alignment::Right,
+                None,
+            ),
+            pad_str(
+                &relative_time(&session.modified, now_ms),
+                TIME_COL,
+                Alignment::Right,
+                None,
+            ),
+        );
+        labels.push(unique_label(&mut seen, row));
+        choices.push(SessionChoice::Resume {
+            file: session.file.clone(),
         });
     }
+    labels.push("✚ new session".to_owned());
+    choices.push(SessionChoice::New);
     (labels, choices)
 }
 
@@ -660,19 +706,6 @@ fn unique_label(seen: &mut HashMap<String, u32>, label: String) -> String {
     } else {
         format!("{label} [#{count}]")
     }
-}
-
-/// Collapse a session title into one short display line.
-///
-/// Titles fall back to the first user message, which can be a whole
-/// document; the selector stays usable with a truncated single line.
-fn display_title(title: &str, max_chars: usize) -> String {
-    let single = single_line(title);
-    if single.chars().count() <= max_chars {
-        return single;
-    }
-    let head: String = single.chars().take(max_chars.saturating_sub(1)).collect();
-    format!("{head}…")
 }
 
 /// Collapse whitespace (incl. newlines) into single spaces.
@@ -796,100 +829,95 @@ mod tests {
     }
 
     #[test]
-    fn choices_keep_unavailable_sessions_visible() {
-        let catalog = WorkspaceCatalog {
-            schema_version: 1,
-            workspaces: vec![
-                workspace(
-                    "default",
-                    "/w/main",
-                    true,
-                    None,
-                    vec![session("t", 1, "2026-08-16T10:00:00.000Z")],
-                ),
-                workspace(
-                    "gone",
-                    "/w/gone",
-                    false,
-                    Some("workspace root not found on disk"),
-                    vec![session("stale", 2, "2026-08-16T11:00:00.000Z")],
-                ),
-            ],
-        };
+    fn workspace_labels_align_names_and_flag_unavailable() {
+        let workspaces = vec![
+            workspace(
+                "default",
+                "/home/me/Projects/qingluan",
+                true,
+                None,
+                vec![session("t", 1, "2026-08-16T10:00:00.000Z")],
+            ),
+            workspace(
+                "gone",
+                "/home/me/Projects/gone",
+                false,
+                Some("workspace root not found on disk"),
+                vec![],
+            ),
+        ];
 
-        let (labels, choices) = build_session_choices(&catalog);
+        let labels = workspace_labels(&workspaces, Some("/home/me"));
 
+        assert_eq!(labels[0], "default  ~/Projects/qingluan  1 session");
         assert_eq!(
-            labels,
-            vec![
-                "default ── t (1 msgs, 2026-08-16T10:00:00.000Z)".to_owned(),
-                "default ── ✚ new session".to_owned(),
-                "gone ── × stale (2 msgs, 2026-08-16T11:00:00.000Z) [workspace root not found on disk]".to_owned(),
-            ]
+            labels[1],
+            "gone     ~/Projects/gone  × workspace root not found on disk"
         );
-        assert_eq!(
-            choices[2],
-            SessionChoice::Unavailable {
-                name: "gone".into(),
-                reason: "workspace root not found on disk".into(),
-            }
-        );
-        assert!(matches!(choices[0], SessionChoice::Resume { .. }));
-        assert!(matches!(choices[1], SessionChoice::New { .. }));
-        assert!(labels.iter().any(|label| label.contains("stale")));
     }
 
     #[test]
-    fn duplicate_labels_get_unique_suffixes() {
-        let catalog = WorkspaceCatalog {
-            schema_version: 1,
-            workspaces: vec![
-                workspace(
-                    "same",
-                    "/w/a",
-                    true,
-                    None,
-                    vec![
-                        session("dup", 1, "2026-08-16T10:00:00.000Z"),
-                        session("dup", 1, "2026-08-16T10:00:00.000Z"),
-                    ],
-                ),
-                workspace(
-                    "same",
-                    "/w/b",
-                    false,
-                    Some("workspace root not found on disk"),
-                    vec![],
-                ),
-                workspace(
-                    "same",
-                    "/w/b",
-                    false,
-                    Some("workspace root not found on disk"),
-                    vec![],
-                ),
-            ],
-        };
+    fn session_choices_align_columns_and_append_new_session() {
+        let sessions = vec![
+            session("implement the frobnicator", 123, "2026-08-16T10:55:34.971Z"),
+            session("b", 1, "2026-08-16T07:55:34.971Z"),
+        ];
+        let now = 1_786_877_734_971u64; // 2026-08-16T10:55:34.971Z
 
-        let (labels, choices) = build_session_choices(&catalog);
+        let (labels, choices) = session_choices(&sessions, 80, now);
 
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[2], "✚ new session");
         assert_eq!(
-            labels,
-            vec![
-                "same ── dup (1 msgs, 2026-08-16T10:00:00.000Z)".to_owned(),
-                "same ── dup (1 msgs, 2026-08-16T10:00:00.000Z) [#2]".to_owned(),
-                "same ── ✚ new session".to_owned(),
-                "same ── × workspace root not found on disk".to_owned(),
-                "same ── × workspace root not found on disk [#2]".to_owned(),
-            ]
-        );
-        assert_eq!(choices.len(), labels.len());
-        assert_eq!(
-            choices[4],
-            SessionChoice::Unavailable {
-                name: "same".into(),
-                reason: "workspace root not found on disk".into(),
+            choices[0],
+            SessionChoice::Resume {
+                file: "/sessions/implement the frobnicator.jsonl".to_owned()
             }
         );
+        assert_eq!(choices[2], SessionChoice::New);
+        assert!(labels[0].contains("123 msgs"));
+        assert!(labels[0].contains("just now"));
+        assert!(labels[1].contains("3h ago"));
+        // Aligned session rows share one display width.
+        assert_eq!(
+            measure_text_width(&labels[0]),
+            measure_text_width(&labels[1])
+        );
+        // The whole row fits the terminal budget.
+        assert!(measure_text_width(&labels[0]) <= 80);
+    }
+
+    #[test]
+    fn long_titles_truncate_to_fit_terminal() {
+        let long = "x".repeat(200);
+        let (labels, choices) = session_choices(
+            &[session(&long, 5, "2026-08-16T10:00:00.000Z")],
+            60,
+            1_786_877_734_971,
+        );
+
+        assert_eq!(
+            choices[0],
+            SessionChoice::Resume {
+                file: format!("/sessions/{long}.jsonl")
+            }
+        );
+        assert!(labels[0].contains('…'));
+        assert!(measure_text_width(&labels[0]) <= 60);
+    }
+
+    #[test]
+    fn duplicate_session_rows_get_unique_suffixes() {
+        let sessions = vec![
+            session("dup", 1, "2026-08-16T10:00:00.000Z"),
+            session("dup", 1, "2026-08-16T10:00:00.000Z"),
+        ];
+
+        let (labels, choices) = session_choices(&sessions, 80, 1_786_877_734_971);
+
+        assert_eq!(choices[0], choices[1]);
+        assert_eq!(choices[2], SessionChoice::New);
+        assert_ne!(labels[0], labels[1]);
+        assert!(labels[1].ends_with("[#2]"));
     }
 }
