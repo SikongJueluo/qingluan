@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use console::{Alignment, Style, Term, measure_text_width, pad_str, style, truncate_str};
-use dialoguer::{Confirm, FuzzySelect, theme::ColorfulTheme};
+use dialoguer::{Confirm, FuzzySelect, Input, theme::ColorfulTheme};
 use qingluan_core::workspace::{
     SessionSummary, WorkspaceCatalog, WorkspaceSummary, add_workspace, discover, forget_workspace,
     jj_root, list_jj_workspaces, parse_iso8601_ms, workspace_clean,
@@ -106,8 +106,9 @@ async fn main() {
             cmd_health(&daemon_url).await;
         }
         Commands::Workspace { action } => {
-            // No config consumption here: workspace list/open must keep
-            // working when the config file is broken.
+            // Config is loaded lazily per action: workspace list/open keep
+            // working when the config file is broken (only the open-flow
+            // `✚ new workspace` entry needs it, same as `workspace add`).
             cmd_workspace(action);
         }
     }
@@ -171,62 +172,10 @@ fn cmd_workspace(action: WorkspaceAction) {
     }
 }
 
-/// `workspace add`: pre-check, place the destination, delegate to jj.
+/// `workspace add`: shared creation path plus command output.
 fn cmd_workspace_add(name: &str, revision: Option<&str>, at: Option<PathBuf>, json: bool) {
-    let config = qingluan_config::load().unwrap_or_else(|e| machine_error("config_invalid", e));
-
-    let registered = list_jj_workspaces().unwrap_or_else(|e| machine_error(e.code(), e));
-    if registered.iter().any(|ws| ws.name == name) {
-        machine_error(
-            "workspace_exists",
-            format!("workspace named '{name}' already exists in this repository"),
-        );
-    }
-
-    let repo_root = jj_root().unwrap_or_else(|e| machine_error(e.code(), e));
-    let destination = compute_destination(&config.workspace.root, &repo_root, name, at.as_deref());
-
-    // Parent directories are ours to create; the destination itself must be
-    // an empty (or absent) directory — jj rejects non-empty ones, but we
-    // pre-check to keep the error structured.
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).unwrap_or_else(|e| {
-            machine_error(
-                "mkdir_failed",
-                format!("failed to create {}: {e}", parent.display()),
-            )
-        });
-    }
-    if destination.is_dir() {
-        let empty = std::fs::read_dir(&destination).is_ok_and(|mut d| d.next().is_none());
-        if !empty {
-            machine_error(
-                "destination_not_empty",
-                format!(
-                    "destination {} exists and is not empty",
-                    destination.display()
-                ),
-            );
-        }
-    } else if destination.exists() {
-        machine_error(
-            "destination_not_empty",
-            format!(
-                "destination {} exists and is not a directory",
-                destination.display()
-            ),
-        );
-    } else {
-        std::fs::create_dir(&destination).unwrap_or_else(|e| {
-            machine_error(
-                "mkdir_failed",
-                format!("failed to create {}: {e}", destination.display()),
-            )
-        });
-    }
-
-    let revisions: Vec<String> = revision.map(|r| vec![r.to_owned()]).unwrap_or_default();
-    add_workspace(&destination, name, &revisions).unwrap_or_else(|e| machine_error(e.code(), e));
+    let destination = create_workspace(name, revision, at.as_deref())
+        .unwrap_or_else(|e| machine_error(e.code, e.message));
 
     if json {
         println!(
@@ -253,6 +202,86 @@ fn cmd_workspace_add(name: &str, revision: Option<&str>, at: Option<PathBuf>, js
             .dim()
         );
     }
+}
+
+/// Failure of the shared workspace-creation path: a machine-readable
+/// code plus a human message.
+struct CreateError {
+    code: &'static str,
+    message: String,
+}
+
+/// Shared creation path of `workspace add` and the open-flow `✚ new
+/// workspace` entry: pre-check name and destination, place the directory,
+/// delegate to `jj workspace add`. Returns the new workspace root.
+fn create_workspace(
+    name: &str,
+    revision: Option<&str>,
+    at: Option<&Path>,
+) -> Result<PathBuf, CreateError> {
+    let config = qingluan_config::load().map_err(|e| CreateError {
+        code: "config_invalid",
+        message: e.to_string(),
+    })?;
+
+    let registered = list_jj_workspaces().map_err(|e| CreateError {
+        code: e.code(),
+        message: e.to_string(),
+    })?;
+    if registered.iter().any(|ws| ws.name == name) {
+        return Err(CreateError {
+            code: "workspace_exists",
+            message: format!("workspace named '{name}' already exists in this repository"),
+        });
+    }
+
+    let repo_root = jj_root().map_err(|e| CreateError {
+        code: e.code(),
+        message: e.to_string(),
+    })?;
+    let destination = compute_destination(&config.workspace.root, &repo_root, name, at);
+
+    // Parent directories are ours to create; the destination itself must be
+    // an empty (or absent) directory — jj rejects non-empty ones, but we
+    // pre-check to keep the error structured.
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CreateError {
+            code: "mkdir_failed",
+            message: format!("failed to create {}: {e}", parent.display()),
+        })?;
+    }
+    if destination.is_dir() {
+        let empty = std::fs::read_dir(&destination).is_ok_and(|mut d| d.next().is_none());
+        if !empty {
+            return Err(CreateError {
+                code: "destination_not_empty",
+                message: format!(
+                    "destination {} exists and is not empty",
+                    destination.display()
+                ),
+            });
+        }
+    } else if destination.exists() {
+        return Err(CreateError {
+            code: "destination_not_empty",
+            message: format!(
+                "destination {} exists and is not a directory",
+                destination.display()
+            ),
+        });
+    } else {
+        std::fs::create_dir(&destination).map_err(|e| CreateError {
+            code: "mkdir_failed",
+            message: format!("failed to create {}: {e}", destination.display()),
+        })?;
+    }
+
+    let revisions: Vec<String> = revision.map(|r| vec![r.to_owned()]).unwrap_or_default();
+    add_workspace(&destination, name, &revisions).map_err(|e| CreateError {
+        code: e.code(),
+        message: e.to_string(),
+    })?;
+    Ok(destination)
 }
 
 /// `workspace remove`: forget via jj; optionally purge the directory with
@@ -549,28 +578,34 @@ fn relative_time(modified: &str, now_ms: u64) -> String {
 }
 
 /// `workspace open`: two-level interactive flow. Level 1 picks a
-/// workspace, level 2 picks one of that workspace's sessions (or a new
-/// one); a flat all-sessions list grows past the terminal and flickers.
+/// workspace (or creates one via the trailing `✚ new workspace` entry,
+/// which enters Pi straight away — a fresh workspace needs no session
+/// pick); level 2 picks one of that workspace's sessions (or a new one);
+/// a flat all-sessions list grows past the terminal and flickers.
 fn cmd_workspace_open() {
     let catalog = match discover(None) {
         Ok(catalog) => catalog,
         Err(e) => machine_error(e.code(), e),
     };
-    if catalog.workspaces.is_empty() {
-        machine_error(
-            "no_workspaces",
-            "no workspace registered in this repository",
-        );
-    }
 
-    let ws_labels = workspace_labels(&catalog.workspaces, std::env::var("HOME").ok().as_deref());
+    let labels = workspace_open_labels(&catalog.workspaces, std::env::var("HOME").ok().as_deref());
+    let create_index = labels.len() - 1;
+
     loop {
         // Level 1: pick a workspace.
-        let index = match select(&ws_labels, "Select a workspace") {
+        let index = match select(&labels, "Select a workspace") {
             Some(index) => index,
             // Esc / q: cancelled, not an error.
             None => std::process::exit(0),
         };
+        if index == create_index {
+            match create_workspace_flow() {
+                // Fresh workspace: straight into a new Pi session.
+                Some(root) => launch_pi(&root, &[]),
+                // Cancelled: back to the workspace selector.
+                None => continue,
+            }
+        }
         let ws = &catalog.workspaces[index];
 
         // Unavailable roots cannot host Pi; keep the reason visible, retry.
@@ -597,6 +632,40 @@ enum SessionPick {
     New,
     /// Resume this session file.
     Resume { file: String },
+}
+
+/// Open-flow `✚ new workspace` entry: prompt for a name, create the
+/// workspace with `workspace add` defaults, return its root. Ctrl+C
+/// cancels back to the workspace selector; creation failures are
+/// reported and the prompt retried.
+fn create_workspace_flow() -> Option<String> {
+    loop {
+        // dialoguer 0.11's Input has no opt variant: Esc is swallowed by
+        // the key loop, and Ctrl+C surfaces as an Err — treat that as a
+        // cancel back to the selector.
+        let name = match Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("New workspace name (Ctrl+C: cancel)")
+            .interact_text()
+        {
+            Ok(name) => name.trim().to_owned(),
+            Err(_) => return None,
+        };
+        if name.is_empty() {
+            eprintln!("{}", style("× workspace name must not be empty").red());
+            continue;
+        }
+        match create_workspace(&name, None, None) {
+            Ok(destination) => {
+                println!(
+                    "added workspace {} at {}",
+                    style(&name).bold(),
+                    destination.display()
+                );
+                return Some(destination.to_string_lossy().into_owned());
+            }
+            Err(e) => eprintln!("{}", style(format!("× {}", e.message)).red()),
+        }
+    }
 }
 
 /// Level-2 selector: one workspace's sessions plus `✚ new session`.
@@ -647,6 +716,19 @@ fn workspace_labels(workspaces: &[WorkspaceSummary], home: Option<&str>) -> Vec<
             }
         })
         .collect()
+}
+
+/// Trailing entry of the level-1 open selector: create a workspace.
+const NEW_WORKSPACE_LABEL: &str = "✚ new workspace";
+
+/// Level-1 selector rows for the open flow: one row per workspace (see
+/// [`workspace_labels`]) plus a trailing `✚ new workspace` entry, mirroring
+/// the session selector's `✚ new session`. An empty catalog still offers
+/// creation instead of erroring.
+fn workspace_open_labels(workspaces: &[WorkspaceSummary], home: Option<&str>) -> Vec<String> {
+    let mut labels = workspace_labels(workspaces, home);
+    labels.push(NEW_WORKSPACE_LABEL.to_owned());
+    labels
 }
 
 /// Level-2 selector rows for one workspace: aligned three-column session
@@ -854,6 +936,25 @@ mod tests {
             labels[1],
             "gone     ~/Projects/gone  × workspace root not found on disk"
         );
+    }
+
+    #[test]
+    fn open_labels_append_new_workspace_entry() {
+        let workspaces = vec![workspace(
+            "default",
+            "/home/me/Projects/qingluan",
+            true,
+            None,
+            vec![],
+        )];
+
+        let labels = workspace_open_labels(&workspaces, Some("/home/me"));
+
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0], "default  ~/Projects/qingluan  no sessions");
+        assert_eq!(labels[1], "✚ new workspace");
+        // An empty catalog still offers creation instead of erroring.
+        assert_eq!(workspace_open_labels(&[], None), vec!["✚ new workspace"]);
     }
 
     #[test]
