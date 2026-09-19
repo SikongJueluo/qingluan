@@ -2,17 +2,19 @@
 
 ## 设计原则
 
+目标入口分工（terminal 的 gRPC 接入尚未实现）：
+
 ```
-Agent ──▶ CLI (qingluan) ──HTTP──▶ Daemon (qingluan-daemon) ──▶ Sandbox Provider
-                                         ▲
-User  ──▶ Tauri Desktop ──IPC──▶  Tauri Commands (薄封装)
+Agent ──▶ Harness Adapter ──▶ TS Client ──gRPC/UDS──▶ Daemon
+User  ──▶ CLI (qingluan) ──────────────────────────▶ Daemon
+User  ──▶ Tauri Desktop ──IPC──▶ Tauri Commands ────▶ Daemon
 ```
 
-1. **CLI 不依赖 UI**：Agent 只通过 CLI JSON 接口交互（例外：`workspace open`，见下）
-2. **Tauri 不承载重业务**：Tauri commands 只做薄封装，转发到本地 daemon
-3. **Daemon 集中编排**：管理 task/sandbox/event/artifact 生命周期
-4. **Frontend 双向连接**：通过 Tauri IPC 或直接 HTTP 访问 daemon
-5. **Workspace 切换是纯本地能力**：`workspace` 子命令直接读 JJ/Pi 本地状态，不经 daemon、无缓存/租约
+1. **CLI 是可选入口**：面向人类的操作、管理与观察，不依赖桌面 UI；保留机器可读模式，但不要求每项能力都经 CLI 或提供同名 CLI 命令。Agent 可通过 client/adapter 直接调用 daemon，也可按需使用 CLI。
+2. **Tauri 不承载重业务**：Tauri commands 只做薄封装，转发到本地 daemon。
+3. **Daemon 集中编排**：管理有状态能力的生命周期；具体 terminal 约定见 [设计基线](../design/agent-terminal.md)，task/sandbox 等仍按各自实现进度接入。
+4. **区分目标与现状**：当前 CLI health、Tauri commands 使用 HTTP；新增 terminal 已选 gRPC over Unix socket。terminal 首版暂时保留既有 HTTP 调用，不捆绑 CLI/Tauri 整体迁移；旧入口后续迁移另议。
+5. **Workspace 切换是纯本地能力**：`workspace` 子命令直接读 JJ/Pi 本地状态，不经 daemon、无缓存/租约。
 
 ## CLI (`qingluan`)
 
@@ -25,9 +27,10 @@ User  ──▶ Tauri Desktop ──IPC──▶  Tauri Commands (薄封装)
 daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
 占位命令；task 系命令待执行引擎落地后随 daemon 端点一起引入。
 
-- 非交互命令的 stdout = 机器可读 JSON（稳定契约）
-- 唯一例外：`workspace open` 占用终端做交互选择（dialoguer），此时 stdout
-  不是机器 JSON；这是 CLI 中唯一的交互式命令
+- 保持已有机器可读契约：`health` 的 stdout 为 JSON；workspace 命令以
+  `--json` 选择机器模式，默认 human 输出见各子命令说明
+- `workspace open` 占用终端做交互选择（dialoguer），此时 stdout
+  不是机器 JSON；这是当前 CLI 中的交互式命令，不限制未来人类入口
 - stderr = 日志（及 `workspace open` 的 × 原因提示）
 - exit code: 0 = 成功，非 0 = 失败；daemon 未启动时提示用户手动启动
 
