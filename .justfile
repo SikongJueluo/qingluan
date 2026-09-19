@@ -28,6 +28,25 @@ cli ARGS='':
 check:
     cargo check --workspace
 
+# Throwaway terminal technology probes (not production implementation)
+terminal-probe-generate:
+    bash probes/terminal/grpc/generate.sh
+
+terminal-probe-grpc: terminal-probe-generate
+    bash probes/terminal/grpc/run.sh
+
+terminal-probe-pty:
+    bash probes/terminal/pty/run.sh
+
+# Throwaway hybrid storage/recovery probe (probe C, Gate C complete).
+# NOT production implementation: unit tests + selfcheck + crash matrix and
+# recovery scenarios across real writer/recover child processes.
+terminal-probe-storage:
+    bash probes/terminal/storage/run.sh
+
+# All three throwaway terminal probes (gRPC, PTY, storage).
+terminal-probe-all: terminal-probe-grpc terminal-probe-pty terminal-probe-storage
+
 # Tauri
 tauri-dev:
     cd apps/desktop/frontend && bun tauri dev

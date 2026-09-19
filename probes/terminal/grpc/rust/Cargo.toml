@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "qingluan-terminal-grpc-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bytes = "1"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "=0.14.6", features = ["transport"] }
+tonic-prost = "=0.14.6"
+
+[build-dependencies]
+tonic-prost-build = "=0.14.6"

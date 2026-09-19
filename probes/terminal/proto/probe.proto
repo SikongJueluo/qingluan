@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package qingluan.terminal.probe.v1;
+
+service ProbeService {
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  rpc Echo(EchoRequest) returns (EchoResponse);
+  rpc Stream(StreamRequest) returns (stream StreamItem);
+  rpc Fail(FailRequest) returns (FailResponse);
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  uint32 protocol_major = 1;
+  repeated string capabilities = 2;
+}
+
+enum ProbeMode {
+  PROBE_MODE_UNSPECIFIED = 0;
+  PROBE_MODE_BASIC = 1;
+}
+
+message EchoRequest {
+  bytes payload = 1;
+  uint64 sequence = 2;
+  optional uint64 optional_count = 3;
+  ProbeMode mode = 4;
+  uint32 delay_ms = 5;
+}
+
+message EchoResponse {
+  bytes payload = 1;
+  uint64 sequence = 2;
+  optional uint64 optional_count = 3;
+  ProbeMode mode = 4;
+}
+
+message StreamRequest {
+  uint64 after_sequence = 1;
+  uint32 count = 2;
+  uint32 delay_ms = 3;
+}
+
+message StreamItem {
+  uint64 sequence = 1;
+}
+
+enum FailureScenario {
+  FAILURE_SCENARIO_UNSPECIFIED = 0;
+  FAILURE_SCENARIO_VALID_ZERO = 1;
+  FAILURE_SCENARIO_VALID_LARGE = 2;
+  FAILURE_SCENARIO_MISSING_PAYLOAD = 3;
+  FAILURE_SCENARIO_UNKNOWN_ANY = 4;
+  FAILURE_SCENARIO_MALFORMED_STATUS = 5;
+  FAILURE_SCENARIO_STATUS_MISMATCH = 6;
+  FAILURE_SCENARIO_PLAIN = 7;
+  FAILURE_SCENARIO_UNKNOWN_REASON = 8;
+  FAILURE_SCENARIO_DUPLICATE_DETAIL = 9;
+  FAILURE_SCENARIO_MISSING_WRITTEN_BYTES = 10;
+  FAILURE_SCENARIO_MALFORMED_DETAIL = 11;
+  FAILURE_SCENARIO_VALID_PLUS_UNKNOWN_ANY = 12;
+  FAILURE_SCENARIO_OVERSIZED_STATUS = 13;
+}
+
+enum ProbeErrorReason {
+  PROBE_ERROR_REASON_UNSPECIFIED = 0;
+  PROBE_ERROR_REASON_PARTIAL_WRITE = 1;
+}
+
+message PartialWriteDetails {
+  optional uint64 written_bytes = 1;
+}
+
+message ProbeErrorDetail {
+  ProbeErrorReason reason = 1;
+  oneof payload {
+    PartialWriteDetails partial_write = 2;
+  }
+}
+
+message FailRequest {
+  FailureScenario scenario = 1;
+}
+
+message FailResponse {}
