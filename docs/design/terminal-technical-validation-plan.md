@@ -1,6 +1,8 @@
 # Agent terminal：最小技术验证计划
 
-状态：待用户批准执行。本文只规划三个可丢弃探针，不批准完整 terminal 实现，也不冻结生产 `.proto` 字段。
+状态：已完成；Gate A：PASS，Gate B：PASS，Gate C：PASS。环境、版本、命令与逐项运行证据见[技术验证结果报告](../research/terminal-technical-validation.md)。本文为历史计划，正文保留批准时原文，不再更新；据此的设计修订见[设计基线](agent-terminal.md)与[协议草案](terminal-protocol-v1.md)，后续实施见[生产实现切片计划](terminal-production-implementation-plan.md)。
+
+原文计划范围：只规划三个可丢弃探针，不批准完整 terminal 实现，也不冻结生产 `.proto` 字段。
 
 设计依据：
 

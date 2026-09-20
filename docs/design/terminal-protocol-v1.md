@@ -1,6 +1,6 @@
 # Terminal 协议 v1 草案
 
-状态：行为契约已逐轮确认；本文件将它整理为候选消息结构与 RPC 全表。尚未冻结字段编号、全部枚举及编码，不是可编译 `.proto`，也不代表批准实现。
+状态：行为契约已逐轮确认，执行语义已按 Gate A/B/C 运行证据对齐（[技术验证结果](../research/terminal-technical-validation.md)）。字段编号、全部枚举及编码仍未冻结，不是可编译 `.proto`，也不代表批准实现。
 
 范围与选型依据：[Agent terminal 设计基线](agent-terminal.md)。两份文档冲突时需回到已确认决策核对，不能用本草案中的候选结构静默覆盖基线。
 
@@ -141,7 +141,7 @@ Stop 经有效代际提交后，立即拒绝新 Send，取消尚未开始的输�
 
 服务端使用有界输入消息、有界分块和独立的写入期限；等待可写时同时响应 Stop、租约失效和服务关闭。单个非阻塞写入步骤与控制权切换须有确定次序，不允许跨代际补写。查询／观察不进入输入队列。已提交的停止流程继续完成，已写入的字节不回滚。
 
-具体块大小、队列容量、写入期限与停止调度上界须通过实现验证后配置；有界可中止的语义不再作为可选实现细节。
+有界参数已验证并确认为初始值（报告 §5）：分块 4 KiB；单条 Send ≤ 256 KiB，越界类型化拒绝；有界队列 2 条 + 1 条 in-flight，accepted payload backing ≤ 768 KiB；写入期限 10 s。Stop 调度上界：SIGTERM 宽限 600 ms，`cgroup.kill` 后最长等 3 s；输出关闭最长等 1 s，超时提交唯一 `OutputClosed(Forced)`。Stop 内部 detached 且幂等：提交后首个调用者取消不撤销，重复调用共享同一结果；阻塞写入的中止实测为毫秒级并精确报告已写入字节。清理按每终端独立 cgroup v2 执行，依赖部署前置 `Delegate=yes`（缺失即硬失败）；普通 fork、新进程组与 `setsid` 后代仍在 cgroup 内即被覆盖，主动迁出 cgroup 的进程与远端进程不保证（有意非保证）。
 
 ## 6. 终端状态与转换
 
@@ -168,7 +168,7 @@ OutputEnd = Eof | ForcedClose(reason) | ReadError(reason) | Interrupted
 | 启动成功 | Running，或已观察到 Exited | 通常 Open | 不承诺响应抵达时仍运行 |
 | 根进程退出 | Exited | 保留当前输出状态 | 记录 ProcessExited；不立刻丢弃缓冲输出 |
 | PTY 正常 EOF | 不因此推断进程退出 | Closed(Eof) | 固定最后未换行尾部；记录 OutputClosed |
-| Stop 开始 | 保留已知状态，stopping=true | 保留至关闭 | 尽力清理进程组，先温和后强制 |
+| Stop 开始 | 保留已知状态，stopping=true | 保留至关闭 | 尽力清理终端 cgroup，先温和后强制 |
 | 根已退出但输出仍打开时 Stop | 保留 Exited | 最终 ForcedClose | 清理残留 PTY；可能不完整，不重复完成通知 |
 | 读取故障 | 不伪造进程退出 | Closed(ReadError) | 报不完整，不假装正常 EOF |
 | daemon 重启后旧活动记录 | 无可信退出结果则 Interrupted | 未正常结束则 Interrupted | 不恢复进程、不凭旧 PID 贸然发信号 |
@@ -178,7 +178,7 @@ OutputEnd = Eof | ForcedClose(reason) | ReadError(reason) | Interrupted
 
 根进程运行或输出打开时必然占位；即使快照已为 Exited + Closed，仍要等进程回收、PTY/读写任务及停止流程等管理资源结束后才能释放。仅收到退出事件不能释放配额。预留和清理状态可以完全内部化，不必引入额外的公开终端枚举。
 
-ProcessExited 和 OutputClosed 无固定先后保证，不能只用一个 RUNNING/EXITED 枚举推断所有资源状态。仅根退出触发正常完成通知，OutputClosed 不额外唤醒一次任务完成通知。
+ProcessExited 和 OutputClosed 无固定先后保证，不能只用一个 RUNNING/EXITED 枚举推断所有资源状态。仅根退出触发正常完成通知，OutputClosed 不额外唤醒一次任务完成通知。Linux 上最后一个 slave 关闭后 master read 返回 EIO（errno 5）而非 EOF，实现按正常输出结束处理；root exit 与 output close 独立提交、各一次（已验证）。
 
 ## 7. 查询消息
 
@@ -217,7 +217,7 @@ TailSnapshot {
 
 这些类型共享日志身份与位置类型，但 Read 的固定查询上界不能被误用为实时 Observe 的永久上界。Grep 续点同样绑定 LogIdentity、固定范围和查询参数。
 
-log_epoch 是持久化日志代际，普通重启与轮转不改变；破坏性重建导致旧位置不再可解释时才换代，并拒绝旧游标。server 验证游标中的 session、terminal_id 与日志代际，不接受跨终端使用。
+log_epoch 是持久化日志代际，普通重启与轮转不改变；破坏性重建导致旧位置不再可解释时才换代，并拒绝旧游标。server 验证游标中的 session、terminal_id 与日志代际，不接受跨终端使用。恢复语义已验证（报告 §6）：未提交尾部截断回 committed 边界并隔离、永不采纳；索引指向缺失／截短／损坏段时返回显式 gap 与降级状态；行号水位不回退、编号不复用；同一损坏样本连续两次恢复结果一致；运行中清理日志不杀进程、不重置行号。尾部 revision 固化为历史行后跨轮转仍可精确续读，持有段被清理时同事务失效并按 CURSOR_EXPIRED 拒绝。
 
 最早可用位置必须带行内偏移：超长行前缀已被清理时不能错误报告该行从 byte_offset=0 可读。可变尾部用独立 TailPosition，覆写后旧 revision 失效。
 
@@ -229,7 +229,7 @@ Tail 返回可直接传给 ObserveTerminal 的 ObservationCursor，历史切面�
 
 响应候选：`fragments + next_cursor? + truncation_reason + retained_range`。
 
-首次读取确定 end_line，后续分页不随新输出扩展；固定范围不阻止轮转。长行按 byte_offset 续读，文本尽量在完整 UTF-8 字符边界截断。
+首次读取确定 end_line，后续分页不随新输出扩展；固定范围不阻止轮转。Gate C 实测覆盖的是活位置续读：钉在当前末尾的 `(line, byte_offset)` 游标跨后续 append 与轮转仍精确续读（探针 `ReadCursor` 无 `end_line`，报告 §6）；固定 `end_line` 分页不随新输出扩展**尚未经运行验证**，留待[生产实现切片计划](terminal-production-implementation-plan.md) S4 验收。长行按 byte_offset 续读，文本尽量在完整 UTF-8 字符边界截断（跨帧、跨行与跨轮转续读已验证）。
 
 历史被轮转／显式清理时，返回游标失效和最早可用位置，不自动跳过。查询期间发生清理也必须明确处理，不能报告一个看似连续但实际缺失的范围。
 
@@ -279,7 +279,7 @@ SessionEvent {
 
 AcquireControl 返回 SessionEventState 的一致快照；新控制端从 acked_through_seq 恢复。三个水位均为累计边界，满足 `pruned_through_seq <= acked_through_seq <= last_committed_seq`，初始值为 0。
 
-事件不包含输出正文。event_seq 在 SQLite 事务内分配，退出状态与事件同事务提交；只有提交成功后才能向持久化流公开该序号。不承诺事务失败的内部候选编号不复用，但任何已公开事件序号均不得重用。
+事件不包含输出正文。event_seq 在 SQLite 事务内分配，退出状态与事件同事务提交；只有提交成功后才能向持久化流公开该序号。不承诺事务失败的内部候选编号不复用，但任何已公开事件序号均不得重用。提交先于发布的顺序、ack 单调与越界拒绝、Prune 与 `pruned_through_seq` 同事务且只删已确认连续前缀，均已通过 Gate C 验证（报告 §6）。
 
 事件自身保存解释该事件所需的终端标识及完整事件内容，重放不要求重新查询仍存在的终端记录；具体呈现元数据需有界，不附带环境变量或原始输入。
 
@@ -323,7 +323,7 @@ DeleteTerminalRecord 不级联删除事件，也不要求先清理已确认事�
 
 TS client 需要显式从 grpc-js 的 ServiceError.metadata 读取二进制 trailer，再用生成代码解码，不能假定 grpc-js 自动提供 rich error 对象。Rust 可通过 tonic 的 binary details 能力发送编码后的 google.rpc.Status；具体 helper 依赖尚未额外选定。
 
-下面的常规 status 映射仍为候选，需结合互操作定稿；PARTIAL_WRITE 采用原因码，外层 status 根据中止原因选择。
+错误载体的 tonic ↔ grpc-js 互操作已通过 Gate A 验证（`grpc-status-details-bin` 编解码、内外 status 一致性校验、未知／畸形／冲突详情降级为通用失败且不补零、不自动重试，报告 §4）；下面的常规 status 映射值仍为候选，待 `.proto` 定稿。PARTIAL_WRITE 采用原因码，外层 status 根据中止原因选择。
 
 | 场景 | 候选 gRPC status | 详情 |
 | --- | --- | --- |
@@ -350,12 +350,12 @@ TS client 需要显式从 grpc-js 的 ServiceError.metadata 读取二进制 trai
 
 这些是剩余字段／实现设计和验证点，不是重新开放已确认的产品范围：
 
-1. 按修订后的租约代际提交点验证在途写入、Stop 中止屏障及原子配额回收；规则已定，尚未验证实现。
-2. 类型化日志身份／位置、尾部转历史行映射、UTF-8 边界、Tail→Observe 一致切面和轮转中的读取。
-3. 提交后发布事件、文件段提交顺序、崩溃恢复、磁盘降级报告、事件自解释与连续前缀 Prune 的事务性。
-4. google.rpc.Status / Any / ErrorDetail 的 tonic 与 grpc-js 互操作；字段 presence、畸形详情、未知枚举／字段和能力协商的行为。
-5. 明确消息与队列上限、各 RPC deadline、停止宽限期、List 分页和清理范围参数。
-6. 确定 protobuf 文件组织、字段编号、代码生成流程，再通过最小 UDS 互操作验证；当前不创建这些实现文件。
+1. 租约代际提交点、在途写入中止、Stop 屏障与原子配额回收已由 Gate B 验证（100 次代际切换竞态、`log_stale_writes=0`）。
+2. 类型化日志身份／位置、尾部转历史行映射、UTF-8 边界与轮转中的读取已由 Gate C 在存储层验证；Tail→Observe 一致切面待实现层验证。
+3. 提交后发布事件、文件段提交顺序、崩溃恢复、事件自解释与连续前缀 Prune 的事务性已由 Gate C 验证；磁盘降级的运行时报告待实现层验证。
+4. google.rpc.Status / Any / ErrorDetail 的 tonic 与 grpc-js 互操作已由 Gate A 验证（含 presence、畸形详情、未知枚举／字段与能力协商容忍）。
+5. 消息与队列上限、写入期限与停止宽限期已确认为初始值（§5）；各 RPC deadline、List 分页和清理范围参数待定稿。
+6. 确定 protobuf 文件组织、字段编号与代码生成流程后进入生产实现（[生产实现切片计划](terminal-production-implementation-plan.md)）；当前不创建这些实现文件。
 
 ## 12. 对应验收场景
 
@@ -367,11 +367,11 @@ TS client 需要显式从 grpc-js 的 ServiceError.metadata 读取二进制 trai
 - 退出事件重放与累计确认，观察端不确认，清理后旧游标明确失效。
 - 已退出但输出打开的终端仍占配额、Stop 清理残留、未确认事件阻止记录删除。
 
-本文件仅整理设计，以上场景尚未运行验证。
+本文件仅整理设计；执行与存储语义已由探针验证（见[验证报告](../research/terminal-technical-validation.md)），上述端到端 RPC 场景待生产实现后验证。
 
 ## 13. 错误载体核验来源
 
-以下仅为官方文档／源码核验，不是 Rust/TS 联调通过的证据：
+以下来源用于载体定义核验；Rust/TS 联调已由 Gate A 覆盖（报告 §4）：
 
 - [gRPC richer error model](https://grpc.io/docs/guides/error/#richer-error-model)
 - [google.rpc.Status 定义](https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto)
