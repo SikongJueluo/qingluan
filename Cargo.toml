@@ -8,6 +8,7 @@ members = [
   "crates/qingluan-daemon",
   "crates/qingluan-sandbox",
   "crates/qingluan-storage",
+  "crates/qingluan-terminal",
   "apps/desktop/src-tauri",
 ]
 

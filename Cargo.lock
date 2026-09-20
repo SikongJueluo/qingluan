@@ -2736,6 +2736,13 @@ name = "qingluan-storage"
 version = "0.1.0"
 
 [[package]]
+name = "qingluan-terminal"
+version = "0.1.0"
+dependencies = [
+ "qingluan-core",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
