@@ -4,4 +4,33 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Test-only injection points: failpoint parking in the commit sequence and a
+# runtime-loaded migration-directory override. Never enable in production.
+test-hooks = []
+
 [dependencies]
+qingluan-core = { path = "../qingluan-core" }
+crc32fast = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+# `flock(2)` for the exclusive per-log writer lease (kernel-released on
+# process death, so a crashed writer can never leave a stale lease).
+libc = "0.2"
+# SHA-256 of the complete canonical log key for per-log writer-lease lock
+# names: collision-resistant, so two distinct logs can never be wrongly
+# serialized onto one shared lease.
+sha2 = "0.10"
+
+[dev-dependencies]
+qingluan-storage = { path = ".", features = ["test-hooks"] }
+# Paused-time (`start_paused`) tests of the 50 ms flush deadline.
+tokio = { workspace = true, features = ["test-util"] }
+
+# Real abrupt-crash matrix: the binary doubles as its own crash child
+# (argv dispatch), which the libtest harness cannot intercept.
+[[test]]
+name = "crash_matrix"
+harness = false

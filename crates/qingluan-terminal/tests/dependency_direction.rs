@@ -27,6 +27,20 @@ const FORBIDDEN_IN_TERMINAL: &[&str] = &[
     "qingluan-sandbox",
 ];
 
+const FORBIDDEN_IN_STORAGE: &[&str] = &[
+    "qingluan-terminal",
+    "qingluan-daemon",
+    "qingluan-protocol",
+    "qingluan-cli",
+    "qingluan-sandbox",
+    "tonic",
+    "tonic-prost",
+    "prost",
+    "prost-build",
+    "pty-process",
+    "vte",
+];
+
 fn read_manifest(crate_name: &str) -> String {
     let path: PathBuf = [
         env!("CARGO_MANIFEST_DIR"),
@@ -100,4 +114,10 @@ fn terminal_depends_only_on_core_in_s1() {
 fn storage_does_not_depend_back_on_terminal() {
     let dependencies = dependency_names(&read_manifest("qingluan-storage"));
     assert_absent("qingluan-storage", &dependencies, &["qingluan-terminal"]);
+}
+
+#[test]
+fn storage_stays_below_terminal_and_gains_no_pty_or_wire_deps() {
+    let dependencies = dependency_names(&read_manifest("qingluan-storage"));
+    assert_absent("qingluan-storage", &dependencies, FORBIDDEN_IN_STORAGE);
 }
