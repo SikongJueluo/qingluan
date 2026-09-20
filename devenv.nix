@@ -8,7 +8,6 @@
   packages = with pkgs; [
     cargo-tauri
     cargo-watch
-    protobuf
     pkg-config
     # Tauri 2 Linux system libraries (webkit2gtk-4.1 / javascriptcoregtk-4.1 /
     # libsoup-3.0 arrive via webkitgtk_4_1; devenv propagates their pkgconfig).

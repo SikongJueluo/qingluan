@@ -272,15 +272,15 @@ selfcheck 记录：2 个 segment（发生轮转）、`line_watermark=8`、长行
 
 - 探针变更 ID：**`nltxtlot`**（throwaway 探针代码；已并入线性历史，生产实现不依赖探针代码）。
 - 初始设计变更 ID：**`lopvvvnu`**（设计基线、协议草案与验证计划的初始落盘）。
-- 本报告与后续设计修订属于当前变更 **`tlsmrkts`**；`lopvvvnu → nltxtlot → tlsmrkts` 构成线性历史。
+- 本报告与设计修订落在 **`tlsmrkts`**；后续 **`vzvmzsvs`** 从最终树移除 throwaway 探针。`lopvvvnu → nltxtlot → tlsmrkts → vzvmzsvs` 构成线性历史，探针证据仍可按 change ID 定位。
 - Gate B 原始日志：`/tmp/pty-verify-cold.log`（cold 运行，含完整冷构建，`PROBE_OK scenarios=25`）与 `/tmp/pty-verify-warm.log`（warm 运行，`PROBE_OK scenarios=25`；§5 实测表数值取自 warm 日志）。
 - Gate C 原始证据：
   - `~/Projects/.workspace/qingluan/terminal-validation/target/terminal-probes/storage-evidence/20260920T123205Z-2678639/workdir/{transcript.txt,gate-c/summary.json,selfcheck/summary.json}`（cold）
   - `~/Projects/.workspace/qingluan/terminal-validation/target/terminal-probes/storage-evidence/20260920T123255Z-2684721/workdir/{transcript.txt,gate-c/summary.json,selfcheck/summary.json}`（warm，`storage-evidence/LATEST` 指向此目录）
-- 仓库相对证据：`docs/design/terminal-technical-validation-plan.md`、`probes/terminal/README.md`、`probes/terminal/{grpc,pty,storage}/**`、`probes/terminal/third_party/**`、根 `.justfile`。
+- `nltxtlot` 中的仓库相对证据：`docs/design/terminal-technical-validation-plan.md`、`probes/terminal/README.md`、`probes/terminal/{grpc,pty,storage}/**`、`probes/terminal/third_party/**`、根 `.justfile`；最终树已按计划移除这些 throwaway 文件。
 
 ## 10. 下一步（需单独批准）
 
-1. 只做已被运行证据支持的最小设计修订：PTY 写路径自管、cgroup `Delegate=yes` 硬要求、存储格式与提交／恢复规则、生产默认值标注为“初始值、非基准”。
-2. 为 Gate C 生产默认值补一组针对性实验（真实 4 MiB 段、持续高输出下的批量延迟分布、第 65 个 segment 触发 retained-range 推进的行为、gap 合并到 1024 上限的行为）——当前这些值只有设计论证，没有边界实测。
-3. 生产实现切片计划与 `Delegate=yes` 的真实 systemd 单元验证；在获批准前不开始生产代码。
+1. 最小设计修订与[生产实现切片计划](../design/terminal-production-implementation-plan.md)已在 `tlsmrkts` 完成；这不等于批准生产实现。
+2. 实现存储切片时补 Gate C 生产默认值的边界实验：真实 4 MiB 段、持续高输出下的批量延迟分布、第 65 个 segment 触发 retained-range 推进的行为、gap 合并到 1024 上限的行为。当前这些值只有设计确认，没有边界实测。
+3. 按切片计划另行批准生产实现；`Delegate=yes` 的真实 systemd user unit 验证在 daemon 接入切片完成。
