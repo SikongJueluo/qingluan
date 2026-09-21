@@ -109,7 +109,7 @@ async fn table_columns(root: &TempRoot, table: &str) -> Vec<String> {
 async fn initial_migration_carries_both_streams_and_no_s4_tail() {
     let root = TempRoot::new("initial-schema");
     LogStore::open(&root).await.unwrap();
-    assert_eq!(applied_versions(&root).await, vec![1, 2]);
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3]);
 
     // Per-stream active pointers and watermarks on the terminal row.
     let terminal = table_columns(&root, "terminal").await;
@@ -186,17 +186,17 @@ async fn initial_migration_carries_both_streams_and_no_s4_tail() {
 async fn failing_migration_rolls_back_with_no_half_ddl_and_no_version() {
     let root = TempRoot::new("rollback");
 
-    // Baseline: the real 0001 + 0002 apply cleanly.
+    // Baseline: the real 0001 + 0002 + 0003 apply cleanly.
     let dir = migration_dir(&root, &[]);
     LogStore::open_with_migration_dir(&root, &dir)
         .await
         .unwrap();
-    assert_eq!(applied_versions(&root).await, vec![1, 2]);
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3]);
 
-    // A 0003 whose first statement succeeds and whose second fails: the
+    // A 0004 whose first statement succeeds and whose second fails: the
     // per-migration transaction must roll the whole file back.
     let bad = "CREATE TABLE migration_probe_a (x INTEGER);\nCREATE TABLE migration_probe_b (;";
-    let dir = migration_dir(&root, &[("0003_bad.sql", bad)]);
+    let dir = migration_dir(&root, &[("0004_bad.sql", bad)]);
     match LogStore::open_with_migration_dir(&root, &dir).await {
         Err(StorageError::Migration(_)) => {}
         other => panic!(
@@ -210,17 +210,17 @@ async fn failing_migration_rolls_back_with_no_half_ddl_and_no_version() {
     );
     assert_eq!(
         applied_versions(&root).await,
-        vec![1, 2],
+        vec![1, 2, 3],
         "failed version must not be recorded"
     );
 
-    // The same DB upgrades cleanly once 0003 is fixed.
+    // The same DB upgrades cleanly once 0004 is fixed.
     let good = "CREATE TABLE migration_probe_ok (x INTEGER);";
-    let dir = migration_dir(&root, &[("0003_bad.sql", good)]);
+    let dir = migration_dir(&root, &[("0004_bad.sql", good)]);
     LogStore::open_with_migration_dir(&root, &dir)
         .await
         .unwrap();
-    assert_eq!(applied_versions(&root).await, vec![1, 2, 3]);
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3, 4]);
     assert!(table_exists(&root, "migration_probe_ok").await);
 }
 
@@ -239,11 +239,151 @@ async fn unsupported_persisted_format_version_fails_loudly_at_open() {
     match LogStore::open(&root).await {
         Err(StorageError::FormatVersionUnsupported { found, supported }) => {
             assert_eq!(found, "99");
-            assert_eq!(supported, "2");
+            assert_eq!(supported, "3");
         }
         other => panic!(
             "expected FormatVersionUnsupported, got {:?}",
             other.map(|_| ()).map_err(|error| error.to_string())
         ),
     }
+}
+
+#[tokio::test]
+async fn runtime_registry_migration_has_no_pid_cgroup_env_or_events() {
+    let root = TempRoot::new("runtime-schema");
+    LogStore::open(&root).await.unwrap();
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3]);
+
+    let columns = table_columns(&root, "terminal_runtime").await;
+    for required in [
+        "phase",
+        "process_state",
+        "exit_kind",
+        "exit_value",
+        "output_state",
+        "output_end",
+        "stopping",
+        "size_rows",
+        "size_columns",
+        "revision",
+    ] {
+        assert!(
+            columns.contains(&required.to_owned()),
+            "terminal_runtime must carry {required}"
+        );
+    }
+    // No OS resource handle, environment, or event surface leaks into the
+    // registry: correlation is by identity components only.
+    for forbidden in [
+        "pid",
+        "cgroup",
+        "cgroup_path",
+        "env",
+        "environment",
+        "event_seq",
+        "event",
+    ] {
+        assert!(
+            !columns.contains(&forbidden.to_owned()),
+            "terminal_runtime must not carry {forbidden}"
+        );
+    }
+    assert!(
+        !table_exists(&root, "terminal_runtime_event").await,
+        "the runtime registry is not an event log"
+    );
+
+    // The shape CHECK constraints reject fabricated or half-known states.
+    let pool = raw_pool(&root).await;
+    let mut next_terminal = 0u32;
+    let mut insert = |phase: &str,
+                      process: &str,
+                      kind: Option<&str>,
+                      value: Option<i64>,
+                      output: &str,
+                      end: Option<&str>| {
+        next_terminal += 1;
+        // A fresh key per insert so the UNIQUE primary key never interferes
+        // with the shape checks under test.
+        let sql = format!(
+            "INSERT INTO terminal_runtime
+                 (session_source, external_session_id, terminal_id, phase, process_state,
+                  exit_kind, exit_value, output_state, output_end, stopping,
+                  size_rows, size_columns, revision, created_ms, updated_ms)
+             VALUES ('s', 'e', 't{next_terminal}', ?1, ?2, ?3, ?4, ?5, ?6, 0, 30, 120, 1, 0, 0)"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(phase)
+            .bind(process)
+            .bind(kind)
+            .bind(value)
+            .bind(output)
+            .bind(end)
+            .execute(&pool)
+    };
+    // A valid starting record and a valid interrupted one.
+    insert("starting", "running", None, None, "open", None)
+        .await
+        .unwrap();
+    insert(
+        "cleaning",
+        "interrupted",
+        None,
+        None,
+        "closed",
+        Some("interrupted"),
+    )
+    .await
+    .unwrap();
+    // Unknown phase / process / output values.
+    assert!(
+        insert("finished", "running", None, None, "open", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        insert("running", "gone", None, None, "open", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        insert("running", "running", None, None, "half", None)
+            .await
+            .is_err()
+    );
+    // Exited without a kind/value, and running with one: both rejected.
+    assert!(
+        insert("running", "exited", None, None, "open", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        insert("running", "running", Some("code"), Some(0), "open", None)
+            .await
+            .is_err()
+    );
+    // Closed without an end, and open with one: both rejected.
+    assert!(
+        insert("running", "running", None, None, "closed", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        insert("running", "running", None, None, "open", Some("eof"))
+            .await
+            .is_err()
+    );
+    // Zero size is rejected.
+    assert!(
+        sqlx::query(
+            "INSERT INTO terminal_runtime
+                 (session_source, external_session_id, terminal_id, phase, process_state,
+                  output_state, stopping, size_rows, size_columns, revision, created_ms, updated_ms)
+             VALUES ('s', 'e', 'z', 'starting', 'running', 'open', 0, 0, 120, 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    pool.close().await;
 }

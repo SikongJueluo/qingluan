@@ -14,9 +14,9 @@ use qingluan_core::terminal::{
     ExternalSessionId, LogEpoch, LogIdentity, SessionRef, SessionSource, TerminalId, TerminalRef,
 };
 use qingluan_storage::{
-    AppendOutcome, FaultSite, LogStore, LogStream, ParkPoint, RecoveryAction, StorageError,
-    FLUSH_MAX_BYTES, FLUSH_MAX_DELAY, MAX_FRAME_PAYLOAD, MAX_GAP_RECORDS, MAX_SEGMENT_BYTES,
-    MAX_SEGMENT_METADATA_ROWS,
+    AppendOutcome, FLUSH_MAX_BYTES, FLUSH_MAX_DELAY, FaultSite, GapReason, LogStore, LogStream,
+    MAX_FRAME_PAYLOAD, MAX_GAP_RECORDS, MAX_SEGMENT_BYTES, MAX_SEGMENT_METADATA_ROWS, ParkPoint,
+    RecoveryAction, StorageError, StreamFlushOutcome,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1114,4 +1114,66 @@ async fn sync_failure_latches_recovery_required_until_recovered() {
 #[tokio::test]
 async fn commit_failure_latches_recovery_required_until_recovered() {
     post_failure_latch_case(FaultSite::Commit, false).await;
+}
+
+/// The S3 raw-loss API: a bounded reader records skipped bytes by exact
+/// coordinate. The loss is an explicit, durable raw gap between segments
+/// (never a hole inside one, which re-reading would classify as
+/// corruption), the offset is consumed and never reused, and a recovery
+/// pass leaves the recorded state intact and idempotent.
+#[tokio::test]
+async fn recorded_raw_loss_is_explicit_and_survives_recovery() {
+    let root = TempRoot::new("raw-loss");
+    let store = LogStore::open(&root).await.unwrap();
+    let log = log_identity("0a1b2c3d-0e0f-4a1b-8c2d-0e0f4a1b8c2d");
+    let mut writer = store.open_writer(&log).await.unwrap();
+
+    writer.append_raw(b"abc").await.unwrap();
+    let loss = writer.record_raw_loss(5).await.unwrap();
+    assert_eq!(loss, qingluan_storage::AppendedLoss { offset: 3, len: 5 });
+    assert_eq!(writer.raw_watermark(), 8);
+    assert_eq!(
+        writer.last_flush_outcome(LogStream::Raw),
+        StreamFlushOutcome::Dropped,
+        "a recorded loss is a durable dropped outcome"
+    );
+    // A zero-length loss is a no-op at the current offset.
+    assert_eq!(
+        writer.record_raw_loss(0).await.unwrap(),
+        qingluan_storage::AppendedLoss { offset: 8, len: 0 }
+    );
+
+    // The next append continues past the loss: offsets are consumed, never
+    // reused.
+    let next = writer.append_raw(b"xy").await.unwrap();
+    assert_eq!(next.offset, 8);
+    writer.flush().await.unwrap();
+    assert_eq!(
+        store.read_committed(&log, LogStream::Raw).await.unwrap(),
+        b"abcxy".to_vec(),
+        "only the retained bytes are readable; the loss is not fabricated"
+    );
+    drop(writer);
+
+    // The loss survives a recovery pass as an explicit gap, and the pass is
+    // idempotent.
+    let store = LogStore::open(&root).await.unwrap();
+    let first = store.recover(&log).await.unwrap();
+    assert!(first.degraded, "an explicit loss latches degraded");
+    let snapshot = store.recovery_snapshot(&log).await.unwrap();
+    assert_eq!(snapshot.raw_watermark, 10);
+    assert!(
+        snapshot.gaps.iter().any(|gap| gap.stream == LogStream::Raw
+            && gap.start == 3
+            && gap.end == 8
+            && gap.reason == GapReason::Missing),
+        "the loss is recorded as an explicit raw gap: {:?}",
+        snapshot.gaps
+    );
+    let second = store.recover(&log).await.unwrap();
+    assert_eq!(first, second, "consecutive recoveries must agree");
+    assert_eq!(
+        store.read_committed(&log, LogStream::Raw).await.unwrap(),
+        b"abcxy".to_vec()
+    );
 }

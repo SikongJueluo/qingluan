@@ -12,8 +12,8 @@ use qingluan_core::terminal::{
     ExternalSessionId, LogEpoch, LogIdentity, SessionRef, SessionSource, TerminalId, TerminalRef,
 };
 use qingluan_storage::{
-    FaultSite, LogStore, LogStream, LogWriter, ParkPoint, RecoveryAction, StorageError,
-    StreamFlushOutcome, FLUSH_MAX_BYTES, FLUSH_MAX_DELAY, MAX_SEGMENT_METADATA_ROWS,
+    FLUSH_MAX_BYTES, FLUSH_MAX_DELAY, FaultSite, LogStore, LogStream, LogWriter,
+    MAX_SEGMENT_METADATA_ROWS, ParkPoint, RecoveryAction, StorageError, StreamFlushOutcome,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1344,10 +1344,12 @@ async fn aborted_flush_and_seal_hold_the_lease_then_converges() {
         // The seal completed: the seeded segment's row is sealed and the
         // sealed-away batch reads back.
         let snapshot = store.recovery_snapshot(&log).await.unwrap();
-        assert!(snapshot
-            .segments
-            .iter()
-            .any(|row| row.kind == LogStream::Normalized && row.state == "sealed"));
+        assert!(
+            snapshot
+                .segments
+                .iter()
+                .any(|row| row.kind == LogStream::Normalized && row.state == "sealed")
+        );
         assert_eq!(
             store
                 .read_committed(&log, LogStream::Normalized)

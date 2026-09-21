@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{io_error, StorageError};
+use crate::error::{StorageError, io_error};
 use crate::identity::LogKey;
 
 /// SQLite database file inside the storage root.

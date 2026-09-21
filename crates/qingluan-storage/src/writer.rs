@@ -75,29 +75,29 @@
 //! being swallowed.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use qingluan_core::terminal::{LogEpoch, LogIdentity};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::Instant;
 
+use crate::LogStream;
 use crate::crash::CrashPoint;
 #[cfg(any(test, feature = "test-hooks"))]
 use crate::crash::{ParkFuture, ParkPoint};
 use crate::db::{CommitInput, SegmentCreation, SegmentRow, Store, StreamCommit, TerminalRow};
-use crate::error::{io_error, StorageError};
+use crate::error::{StorageError, io_error};
 use crate::frame::{
-    encode_frame, scan_frames, split_line, split_raw, FrameHeader, ScanOutcome, SegmentHeader,
-    FRAME_FLAG_LINE_END, FRAME_KIND_LINE, FRAME_KIND_RAW, SEGMENT_HEADER_LEN,
+    FRAME_FLAG_LINE_END, FRAME_KIND_LINE, FRAME_KIND_RAW, FrameHeader, SEGMENT_HEADER_LEN,
+    ScanOutcome, SegmentHeader, encode_frame, scan_frames, split_line, split_raw,
 };
 use crate::gap::{GapReason, GapSpan};
 use crate::identity::{HeaderIdentity, LogKey, ResolvedIdentity};
 use crate::lease::WriterLease;
 use crate::paths;
 use crate::recovery::frames_match_row;
-use crate::LogStream;
 
 /// Rotation threshold: a segment is sealed before an append that would
 /// push it past 4 MiB (the plan's production value; the probe's 256 KiB
@@ -153,6 +153,21 @@ pub struct AppendedRaw {
     pub len: u64,
     /// What happened to the batch this append joined.
     pub outcome: AppendOutcome,
+}
+
+/// One explicitly recorded raw-stream loss.
+///
+/// Returned by [`LogWriter::record_raw_loss`]: the raw byte offset the
+/// dropped range started at and its length. The range is consumed (its
+/// offset can never be reused) and recorded as an explicit stream-scoped
+/// gap, so a bounded reader can account for skipped bytes by coordinate
+/// without inventing continuity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppendedLoss {
+    /// Raw stream byte offset of the first dropped byte.
+    pub offset: u64,
+    /// Number of bytes dropped by this loss.
+    pub len: u64,
 }
 
 /// The outcome of flushing one stream's pending batch. This is the
@@ -594,6 +609,32 @@ impl LogWriter {
         .await
     }
 
+    /// Record an explicit raw-stream loss of `len` bytes for a bounded
+    /// reader that must discard bytes it cannot retain.
+    ///
+    /// The bounded PTY reader drains output and hands it to
+    /// [`LogWriter::append_raw`]; when its own buffer is full it discards
+    /// a run instead of blocking the program. This records that run as an
+    /// explicit raw gap and advances the non-reusable raw watermark past
+    /// it, returning the exact coordinate ([`AppendedLoss`]) so the reader
+    /// never accounts a skipped byte as present. Any pending raw batch is
+    /// committed first and the current segment is sealed before the gap is
+    /// recorded, so the loss falls on a segment boundary instead of
+    /// punching a hole that re-reading would classify as corruption; the
+    /// terminal latches `degraded` (+ `refuse_new_start`, matching the
+    /// existing drop path), and draining continues. `len == 0` is a no-op
+    /// at the current offset. Cancellation-safe by construction, like
+    /// [`LogWriter::append_raw`].
+    pub async fn record_raw_loss(&mut self, len: u64) -> Result<AppendedLoss, StorageError> {
+        let shared = Arc::clone(&self.shared);
+        let guard = shared.enter_command();
+        join_command(tokio::spawn(async move {
+            let _registered = guard;
+            record_raw_loss_command(shared, len).await
+        }))
+        .await
+    }
+
     /// Force a batch boundary: flush both streams' pending batches (each
     /// through its own append → `sync_data` → visibility transaction) and
     /// return once they are durable, with each stream's outcome —
@@ -852,6 +893,58 @@ async fn append_raw_command(
         len: append_len,
         outcome,
     })
+}
+
+/// The body of [`LogWriter::record_raw_loss`]: commit any pending raw
+/// batch, seal the current raw segment so the loss lands on a segment
+/// boundary, then record the explicit gap and advance the non-reusable
+/// raw watermark — all under one state lock, inside the command task that
+/// owns the lease. Sealing first is what keeps the raw stream's frames
+/// offset-contiguous inside every segment: a hole inside a segment would
+/// be scanned as corruption after a restart, so the loss is recorded
+/// between segments instead.
+async fn record_raw_loss_command(
+    shared: Arc<WriterShared>,
+    len: u64,
+) -> Result<AppendedLoss, StorageError> {
+    let mut state = shared.state.lock().await;
+    if let Some(detail) = &state.raw.recovery_required {
+        return Err(StorageError::RecoveryRequired {
+            detail: detail.clone(),
+        });
+    }
+    let start = shared.raw_watermark.load(Ordering::Relaxed);
+    if len == 0 {
+        return Ok(AppendedLoss {
+            offset: start,
+            len: 0,
+        });
+    }
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| StorageError::Database("raw byte offset space exhausted".into()))?;
+    // Flush the accepted raw bytes into the current segment, then seal it,
+    // so the discarded range is not covered by any segment's indexed range.
+    flush_raw(&shared, &mut state).await?;
+    seal_active(&shared, &mut state, LogStream::Raw).await?;
+    shared
+        .store
+        .drop_batch(
+            &shared.key,
+            LogStream::Raw,
+            GapSpan {
+                start,
+                end,
+                reason: GapReason::Missing,
+            },
+            end,
+        )
+        .await?;
+    state.pending_raw_start = end;
+    state.raw_deadline = None;
+    shared.raw_watermark.store(end, Ordering::Relaxed);
+    shared.record_outcome(LogStream::Raw, StreamFlushOutcome::Dropped);
+    Ok(AppendedLoss { offset: start, len })
 }
 
 /// The body of [`LogWriter::flush`]: both streams' batches flushed under

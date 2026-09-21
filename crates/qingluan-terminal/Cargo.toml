@@ -4,5 +4,35 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Test-only seams: awaiting a detached stop/finalize to completion and reading
+# the ordered-write evidence counters. Never enable in production.
+test-hooks = []
+
 [dependencies]
 qingluan-core = { path = "../qingluan-core" }
+# Narrow persistence seam (S2): raw append + explicit raw loss + close. The
+# runtime never touches SQLite, segment frames, or the writer lease directly;
+# everything behind `LogStore`/`LogWriter` stays private to storage.
+qingluan-storage = { path = "../qingluan-storage" }
+# Approved pinned stack (plan §2 / design baseline): PTY allocation, spawn,
+# read, and resize; cgroup/term/signal syscall helpers; raw pidfd/pipe
+# syscalls; the async runtime for the self-managed `AsyncFd` write path.
+libc = "0.2"
+nix = { version = "=0.31.3", features = ["process", "signal", "term", "ioctl"] }
+pty-process = { version = "=0.5.3", features = ["async"] }
+tokio = { workspace = true }
+# Qingluan-minted canonical identities: `TerminalId` and `LogEpoch` are
+# canonical UUID text at the storage seam, so the runtime mints them here.
+uuid = { workspace = true }
+
+[dev-dependencies]
+qingluan-terminal = { path = ".", features = ["test-hooks"] }
+tokio = { workspace = true, features = ["test-util"] }
+
+# The Gate B fixture binary used by the integration behavior tests. It lives
+# under `tests/` on purpose: fixtures are test-only and never part of the
+# production library.
+[[bin]]
+name = "terminal-pty-fixture"
+path = "tests/fixtures/pty_fixture.rs"

@@ -66,16 +66,16 @@ use std::path::Path;
 use qingluan_core::terminal::LogIdentity;
 use tokio::io::AsyncWriteExt;
 
+use crate::LogStream;
 use crate::db::{SegmentRow, Store};
-use crate::error::{io_error, StorageError};
+use crate::error::{StorageError, io_error};
 use crate::frame::{
-    scan_frames, ScanOutcome, ScanReport, SegmentHeader, FRAME_FLAG_LINE_END, SEGMENT_HEADER_LEN,
+    FRAME_FLAG_LINE_END, SEGMENT_HEADER_LEN, ScanOutcome, ScanReport, SegmentHeader, scan_frames,
 };
 use crate::gap::{GapReason, GapSpan};
 use crate::identity::ResolvedIdentity;
 use crate::lease::WriterLease;
 use crate::paths;
-use crate::LogStream;
 
 /// One explicit gap of one stream as the production recovery seam
 /// reports it: domain coordinates only. The stream discriminates the
@@ -981,8 +981,8 @@ mod tests {
     use super::*;
     use crate::db::SegmentRow;
     use crate::frame::{
-        encode_frame, FrameHeader, FRAME_FLAG_LINE_END, FRAME_HEADER_LEN, FRAME_KIND_LINE,
-        FRAME_KIND_RAW, SEGMENT_KIND_NORMALIZED, SEGMENT_KIND_RAW,
+        FRAME_FLAG_LINE_END, FRAME_HEADER_LEN, FRAME_KIND_LINE, FRAME_KIND_RAW, FrameHeader,
+        SEGMENT_KIND_NORMALIZED, SEGMENT_KIND_RAW, encode_frame,
     };
 
     fn line_frame(seq: u64, line: u64, offset: u64, payload: &[u8], flags: u8) -> Vec<u8> {

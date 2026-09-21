@@ -14,8 +14,8 @@ use qingluan_core::terminal::{
     ExternalSessionId, LogEpoch, LogIdentity, SessionRef, SessionSource, TerminalId, TerminalRef,
 };
 use qingluan_storage::{
-    AppendOutcome, GapReason, LogStore, LogStream, RecoveryAction, StorageError, FLUSH_MAX_BYTES,
-    MAX_GAP_RECORDS, MAX_SEGMENT_METADATA_ROWS,
+    AppendOutcome, FLUSH_MAX_BYTES, GapReason, LogStore, LogStream, MAX_GAP_RECORDS,
+    MAX_SEGMENT_METADATA_ROWS, RecoveryAction, StorageError,
 };
 
 static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1053,10 +1053,12 @@ async fn gap_records_conservatively_coarsen_at_the_1024_cap() {
         GAPS,
         "every lost segment is an explicit action"
     );
-    assert!(report
-        .actions
-        .iter()
-        .all(|action| matches!(action, RecoveryAction::SegmentLost { .. })));
+    assert!(
+        report
+            .actions
+            .iter()
+            .all(|action| matches!(action, RecoveryAction::SegmentLost { .. }))
+    );
 
     let snapshot = store.recovery_snapshot(&log).await.unwrap();
     assert!(snapshot.degraded);
@@ -1065,10 +1067,12 @@ async fn gap_records_conservatively_coarsen_at_the_1024_cap() {
         MAX_GAP_RECORDS,
         "the persisted set must sit exactly at the cap"
     );
-    assert!(snapshot
-        .gaps
-        .iter()
-        .all(|gap| gap.stream == LogStream::Normalized));
+    assert!(
+        snapshot
+            .gaps
+            .iter()
+            .all(|gap| gap.stream == LogStream::Normalized)
+    );
     // No narrowing and no overlap: sorted, disjoint, and every original
     // loss stays inside some record (coarsening only ever widens).
     let mut records = snapshot.gaps.clone();

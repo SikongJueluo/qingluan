@@ -31,13 +31,23 @@
 //!   `#[non_exhaustive]` enums until the production `.proto` freezes:
 //!   protocol encodings belong to the daemon adapter, and adding a
 //!   variant must not break matching code outside this crate.
+//! - A start is fully explicit: program, args, cwd, a complete UTF-8
+//!   environment snapshot (empty is legal, missing is unrepresentable),
+//!   and the initial size. A control lease is identified by a non-zero
+//!   generation; a send that stopped early is a typed partial write
+//!   carrying its exact known byte count, classified by a wire-agnostic
+//!   abort reason.
 
+mod control;
 mod event;
 mod ids;
 mod position;
 mod reason;
+mod send;
 mod snapshot;
+mod start;
 
+pub use control::ControlGeneration;
 pub use event::{
     EventSequence, SessionEvent, SessionEventPayload, SessionEventState, WatermarkError,
 };
@@ -49,6 +59,8 @@ pub use position::{
     HistoryPosition, HistoryRange, ObservationCursor, PositionError, ReadCursor, TailPosition,
 };
 pub use reason::ReasonCode;
+pub use send::{PartialWrite, SendReceipt, WriteAbort};
 pub use snapshot::{
     ExitResult, OutputEnd, OutputState, ProcessState, TerminalSize, TerminalSnapshot,
 };
+pub use start::{EnvironmentSnapshot, StartSpec};

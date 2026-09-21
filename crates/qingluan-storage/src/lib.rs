@@ -101,6 +101,7 @@ mod identity;
 mod lease;
 mod paths;
 mod recovery;
+mod runtime;
 mod writer;
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -114,8 +115,10 @@ use qingluan_core::terminal::LogIdentity;
 pub use error::StorageError;
 pub use gap::GapReason;
 pub use recovery::{RecoveryGap, RecoveryReport};
+pub use runtime::{RuntimePhase, RuntimeRecord, RuntimeRegistry};
 pub use writer::{
-    AppendOutcome, AppendedLine, AppendedRaw, FlushOutcomes, LogWriter, StreamFlushOutcome,
+    AppendOutcome, AppendedLine, AppendedLoss, AppendedRaw, FlushOutcomes, LogWriter,
+    StreamFlushOutcome,
 };
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -250,6 +253,19 @@ impl LogStore {
     /// or its process died — the OS lease is kernel-released on death).
     pub async fn open_writer(&self, log: &LogIdentity) -> Result<LogWriter, StorageError> {
         LogWriter::attach(Arc::clone(&self.store), &self.root, log).await
+    }
+
+    /// A durable runtime registry sharing this store's single SQLite
+    /// connection.
+    ///
+    /// A caller that needs both the log writer and the runtime registry for
+    /// one storage root (the terminal runtime) must use this instead of a
+    /// second [`RuntimeRegistry::open`]: two connections to one SQLite file
+    /// can deadlock on a WAL write-lock upgrade under concurrent writes
+    /// (the writer's flush driver races the registry). One root, one
+    /// connection, no cross-connection lock.
+    pub fn runtime_registry(&self) -> RuntimeRegistry {
+        RuntimeRegistry::from_shared(Arc::clone(&self.store))
     }
 
     /// Run the recovery pass of one terminal log (creating the terminal

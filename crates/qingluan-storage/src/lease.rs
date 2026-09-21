@@ -40,7 +40,7 @@ use std::path::Path;
 
 use tokio::time::Instant;
 
-use crate::error::{io_error, StorageError};
+use crate::error::{StorageError, io_error};
 use crate::identity::LogKey;
 use crate::paths;
 

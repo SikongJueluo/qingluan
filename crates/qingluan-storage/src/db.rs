@@ -26,15 +26,15 @@ use sqlx::sqlite::{
 };
 use sqlx::{Row, SqlSafeStr, SqlitePool};
 
+use crate::LogStream;
 use crate::crash::{CrashPoint, CrashSink};
-use crate::error::{db_error, i64_of, io_error, migrate_error, u64_of, StorageError};
-use crate::gap::{coalesce, GapReason, GapSpan};
+use crate::error::{StorageError, db_error, i64_of, io_error, migrate_error, u64_of};
+use crate::gap::{GapReason, GapSpan, coalesce};
 use crate::identity::{HeaderIdentity, LogKey};
 use crate::paths;
-use crate::LogStream;
 
 /// Persisted on-disk format version this build reads and writes.
-pub(crate) const FORMAT_VERSION: &str = "2";
+pub(crate) const FORMAT_VERSION: &str = "3";
 
 /// One terminal row. The two stream pointers, watermarks, and retained
 /// floors are independent: `active_normalized_segment`/`line_watermark`/
@@ -199,6 +199,13 @@ fn embedded_migrator() -> Migrator {
             include_str!("../migrations/0002_recovery_retention.sql").into_sql_str(),
             false,
         ),
+        Migration::new(
+            3,
+            "terminal_runtime".into(),
+            MigrationType::Simple,
+            include_str!("../migrations/0003_terminal_runtime.sql").into_sql_str(),
+            false,
+        ),
     ])
 }
 
@@ -271,6 +278,12 @@ impl Store {
     /// the versioned migrations, and verify the persisted format version.
     pub(crate) async fn open(root: &Path) -> Result<Arc<Store>, StorageError> {
         Store::open_with_migrator(root, embedded_migrator()).await
+    }
+
+    /// The underlying pool, for sibling modules that own their own narrow
+    /// tables on the same storage root (the S3 runtime registry).
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// [`Store::open`] with an explicit migrator (runtime-loaded migration
@@ -587,6 +600,7 @@ impl Store {
     }
 
     /// All segment rows of one stream, oldest first. Never mixes kinds.
+    #[allow(dead_code)] // test-hooks-only query in production builds
     pub(crate) async fn segments(
         &self,
         key: &LogKey,

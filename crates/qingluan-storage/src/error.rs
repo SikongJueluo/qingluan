@@ -39,6 +39,12 @@ pub enum StorageError {
     #[error("unknown log {0}")]
     UnknownLog(String),
 
+    /// A runtime-registry operation is not a legal transition from the
+    /// record's current durable state (a duplicate begin, an illegal phase
+    /// change, or an attempt to overwrite a known outcome).
+    #[error("runtime registry conflict: {detail}")]
+    RuntimeConflict { detail: String },
+
     /// `append_line` must continue at exactly `watermark + 1`; line numbers
     /// are never reused or skipped by the writer (gaps are explicit).
     #[error("line {attempted} does not continue at watermark {watermark} + 1")]

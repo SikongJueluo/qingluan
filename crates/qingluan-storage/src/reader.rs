@@ -17,9 +17,9 @@ use qingluan_core::terminal::LogIdentity;
 
 use crate::db::SegmentRow;
 use crate::error::StorageError;
-use crate::frame::{scan_frames, ScanOutcome, SegmentHeader, SEGMENT_HEADER_LEN};
+use crate::frame::{SEGMENT_HEADER_LEN, ScanOutcome, SegmentHeader, scan_frames};
 use crate::identity::{HeaderIdentity, ResolvedIdentity};
-use crate::recovery::{frames_match_row, validate_chain, ChainLink};
+use crate::recovery::{ChainLink, frames_match_row, validate_chain};
 use crate::{LogStore, LogStream};
 
 /// Read one segment file and validate its committed prefix. Errors (never

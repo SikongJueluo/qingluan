@@ -239,6 +239,7 @@ pub(crate) fn encode_frame(header: &FrameHeader, payload: &[u8]) -> Result<Vec<u
 
 /// One validated frame located inside a scanned buffer.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // offsets are read by test-hooks-only verification
 pub(crate) struct ScannedFrame {
     pub header: FrameHeader,
     /// Offset of the payload within the buffer.

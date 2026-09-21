@@ -21,10 +21,34 @@ const FORBIDDEN_IN_TERMINAL: &[&str] = &[
     "tonic-prost",
     "prost",
     "prost-build",
+    "sqlx",
     "qingluan-daemon",
     "qingluan-protocol",
     "qingluan-cli",
     "qingluan-sandbox",
+];
+
+/// Dependencies the terminal seam must have (plan §2 / design baseline):
+/// the core domain types, PTY allocation/spawn (`pty-process` 0.5.3), the
+/// cgroup/term/signal helpers (`nix` 0.31.3), raw pidfd/pipe syscalls
+/// (`libc`), and the async runtime for the self-managed `AsyncFd` write
+/// path.
+const REQUIRED_IN_TERMINAL: &[&str] = &["qingluan-core", "libc", "nix", "pty-process", "tokio"];
+
+/// The full approved dependency set, including the narrow S2 storage seam
+/// (`qingluan-storage`, per the plan's `daemon → terminal → storage → core`
+/// direction), the UUID minter for canonical `TerminalId`/`LogEpoch` text,
+/// and the crate's own `test-hooks` self dev-dependency. Any other
+/// dependency is an unapproved widening.
+const APPROVED_IN_TERMINAL: &[&str] = &[
+    "qingluan-core",
+    "qingluan-storage",
+    "qingluan-terminal",
+    "libc",
+    "nix",
+    "pty-process",
+    "tokio",
+    "uuid",
 ];
 
 const FORBIDDEN_IN_STORAGE: &[&str] = &[
@@ -104,10 +128,25 @@ fn core_stays_a_pure_domain_layer() {
 }
 
 #[test]
-fn terminal_depends_only_on_core_in_s1() {
+fn terminal_depends_only_on_core_and_the_approved_pinned_stack() {
     let dependencies = dependency_names(&read_manifest("qingluan-terminal"));
     assert_absent("qingluan-terminal", &dependencies, FORBIDDEN_IN_TERMINAL);
-    assert_eq!(dependencies, BTreeSet::from(["qingluan-core".to_owned()]));
+    for name in REQUIRED_IN_TERMINAL {
+        assert!(
+            dependencies.contains(*name),
+            "qingluan-terminal must depend on {name}"
+        );
+    }
+    let mut unexpected: Vec<&str> = dependencies
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !APPROVED_IN_TERMINAL.contains(name))
+        .collect();
+    unexpected.sort_unstable();
+    assert!(
+        unexpected.is_empty(),
+        "qingluan-terminal gained unapproved dependencies: {unexpected:?}"
+    );
 }
 
 #[test]
