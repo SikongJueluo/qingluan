@@ -20,6 +20,11 @@ const router = createRouter({
       name: 'kanban',
       component: () => import('@/views/KanbanBoardView.vue'),
     },
+    {
+      path: '/code-review',
+      name: 'code-review',
+      component: () => import('@/views/CodeReviewView.vue'),
+    },
   ],
 })
 

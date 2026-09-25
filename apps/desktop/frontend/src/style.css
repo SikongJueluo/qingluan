@@ -1,4 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
 
 @import 'tailwindcss';
 
@@ -11,6 +12,7 @@
 @theme inline {
   --font-sans: 'Inter Variable', sans-serif;
   --font-heading: var(--font-sans);
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -125,4 +127,121 @@
     @apply bg-background text-foreground;
     @apply font-sans;
   }
+}
+
+/* Code review: comment gutter (cm-threads.ts) */
+.cm-review-gutter {
+  width: 1.5rem;
+}
+.cm-review-gutter .cm-gutterElement {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.cm-add-comment-marker {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--muted-foreground);
+  opacity: 0;
+}
+.cm-review-gutter .cm-gutterElement:hover .cm-add-comment-marker {
+  opacity: 1;
+}
+.cm-add-comment-marker.has-comments {
+  opacity: 1;
+  color: var(--review-accent-strong);
+  font-weight: 600;
+}
+
+/* Code review: editor font */
+.cm-editor .cm-content,
+.cm-editor .cm-gutters {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+/* Code review: accent palette. Single source — retune here. */
+:root {
+  --review-accent: #3b82f6;
+  --review-accent-strong: #2563eb;
+}
+.dark {
+  --review-accent: #60a5fa;
+  --review-accent-strong: #93c5fd;
+}
+
+/* Code review: draft (in-progress comment) range. Box-shadow overlay instead
+   of background-color so added/deleted diff backgrounds show through. */
+.cm-review-draft-range {
+  box-shadow:
+    inset 2px 0 0 var(--review-accent),
+    inset 0 0 0 999px color-mix(in srgb, var(--review-accent) 6%, transparent);
+}
+.cm-review-range-start {
+  box-shadow:
+    inset 2px 0 0 var(--review-accent),
+    inset 0 1px 0 0 color-mix(in srgb, var(--review-accent) 45%, transparent),
+    inset 0 0 0 999px color-mix(in srgb, var(--review-accent) 6%, transparent);
+}
+.cm-review-range-end {
+  box-shadow:
+    inset 2px 0 0 var(--review-accent),
+    inset 0 -1px 0 0 color-mix(in srgb, var(--review-accent) 45%, transparent),
+    inset 0 0 0 999px color-mix(in srgb, var(--review-accent) 6%, transparent);
+}
+.cm-review-range-start.cm-review-range-end {
+  box-shadow:
+    inset 2px 0 0 var(--review-accent),
+    inset 0 1px 0 0 color-mix(in srgb, var(--review-accent) 45%, transparent),
+    inset 0 -1px 0 0 color-mix(in srgb, var(--review-accent) 45%, transparent),
+    inset 0 0 0 999px color-mix(in srgb, var(--review-accent) 6%, transparent);
+}
+
+/* Code review: comment range bar — a dedicated 3px gutter, same visual
+   language as @codemirror/merge's inserted/deleted change bar. */
+.cm-commentGutter {
+  width: 3px;
+  padding-left: 1px;
+}
+.cm-commentGutter .cm-gutterElement.cm-review-comment-bar {
+  background: var(--review-accent);
+}
+.cm-commentGutter .cm-gutterElement.cm-review-draft-bar {
+  background: color-mix(in srgb, var(--review-accent) 45%, transparent);
+}
+
+/* Code review: saved comment cards get a quiet accent edge, no shadow/ring */
+.cm-review-comment-card {
+  border-left: 2px solid color-mix(in srgb, var(--review-accent) 45%, transparent);
+}
+
+/* Code review: deleted chunks (widget DOM outside the document). Native
+   selection is tinted to the review accent. Drafts paint deleted lines via
+   direct DOM classes: margin/padding compensate the chunk's 6px padding so
+   the accent bar aligns with regular lines; a new-side draft spanning the
+   chunk paints the chunk root instead. */
+.cm-deletedChunk ::selection {
+  background: color-mix(in srgb, var(--review-accent) 28%, transparent);
+}
+.cm-deletedChunk.cm-review-chunk-draft {
+  box-shadow:
+    inset 2px 0 0 var(--review-accent),
+    inset 0 0 0 999px color-mix(in srgb, var(--review-accent) 6%, transparent);
+}
+.cm-deletedLine.cm-review-old-draft {
+  margin-left: -6px;
+  padding-left: 6px;
+  box-shadow:
+    inset 2px 0 0 var(--review-accent),
+    inset 0 0 0 999px color-mix(in srgb, var(--review-accent) 6%, transparent);
+}
+
+/* Code review: inserted inline text uses a deeper background instead of
+   @codemirror/merge's default underline, matching deleted text. */
+.cm-editor.cm-merge-b .cm-content .cm-changedText {
+  background: rgba(34, 187, 34, 0.22);
 }
