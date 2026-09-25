@@ -335,6 +335,14 @@ async fn stale_control_generation_is_rejected() {
         h.runtime.send(&terminal, first(), b"stale".to_vec()).await,
         Err(SendError::Rejected(SendRejection::ControlLost))
     );
+    assert!(matches!(
+        h.runtime.stop_with_generation(&terminal, first()).await,
+        Err(RuntimeError::ControlLost(ref lost)) if lost == &terminal
+    ));
+    assert!(
+        !h.runtime.snapshot(&terminal).await.unwrap().stopping,
+        "a stale Stop must not commit its intent"
+    );
     assert!(
         h.runtime
             .send(&terminal, next, b"ok\n".to_vec())
@@ -342,7 +350,10 @@ async fn stale_control_generation_is_rejected() {
             .is_ok()
     );
 
-    h.runtime.stop(&terminal).await.expect("stop");
+    h.runtime
+        .stop_with_generation(&terminal, next)
+        .await
+        .expect("stop");
     h.runtime.await_cleanup(&terminal).await.expect("cleanup");
     assert_eq!(
         h.runtime.send(&terminal, next, b"after".to_vec()).await,

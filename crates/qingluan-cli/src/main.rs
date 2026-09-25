@@ -67,7 +67,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Run the Qingluan daemon (HTTP API + web UI) in the foreground.
+    /// Run the Qingluan daemon (HTTP/web plus terminal gRPC) in the foreground.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -208,15 +208,19 @@ async fn main() {
         Commands::Daemon { action } => {
             // Same hard-fail semantics the daemon binary used to have:
             // malformed config must abort startup, never fall back.
-            let config = qingluan_config::load().unwrap_or_else(|e| {
+            let mut config = qingluan_config::load().unwrap_or_else(|e| {
                 eprintln!("invalid configuration: {e}");
                 std::process::exit(1);
             });
             match action {
                 DaemonAction::Start { host, port } => {
-                    let host = host.unwrap_or(config.daemon.host);
-                    let port = port.unwrap_or(config.daemon.port);
-                    if let Err(e) = qingluan_daemon::serve(&host, port).await {
+                    if let Some(host) = host {
+                        config.daemon.host = host;
+                    }
+                    if let Some(port) = port {
+                        config.daemon.port = port;
+                    }
+                    if let Err(e) = qingluan_daemon::serve(config).await {
                         eprintln!("daemon failed: {e}");
                         std::process::exit(1);
                     }
@@ -988,7 +992,9 @@ async fn cmd_review(
         },
         Err(e) => machine_error(
             "daemon_unreachable",
-            format!("Daemon is not running at {daemon_url} ({e}). Start it with: qingluan-daemon"),
+            format!(
+                "Daemon is not running at {daemon_url} ({e}). Start it with: qingluan daemon start"
+            ),
         ),
     };
     let id = body.data.expect("ok response carries data").id;
@@ -1039,7 +1045,9 @@ async fn cmd_review_export(daemon_url: &str, id: &str) {
         },
         Err(e) => machine_error(
             "daemon_unreachable",
-            format!("Daemon is not running at {daemon_url} ({e}). Start it with: qingluan-daemon"),
+            format!(
+                "Daemon is not running at {daemon_url} ({e}). Start it with: qingluan daemon start"
+            ),
         ),
     };
     print!("{}", comments_markdown(&comments));
@@ -1095,7 +1103,9 @@ async fn cmd_health(daemon_url: &str) {
         },
         Err(e) => machine_error(
             "daemon_unreachable",
-            format!("Daemon is not running at {daemon_url} ({e}). Start it with: qingluan-daemon"),
+            format!(
+                "Daemon is not running at {daemon_url} ({e}). Start it with: qingluan daemon start"
+            ),
         ),
     }
 }

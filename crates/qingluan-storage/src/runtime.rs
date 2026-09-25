@@ -873,6 +873,37 @@ impl RuntimeRegistry {
         Ok(changed)
     }
 
+    /// Explicitly create the durable all-zero event state for a session and
+    /// return its current watermarks.
+    ///
+    /// This is the persistence commit used by control acquisition: unlike a
+    /// read of an unknown session, it intentionally creates the session's
+    /// durable identity. Repeated calls are harmless and never reset an
+    /// existing watermark.
+    pub async fn ensure_event_session(
+        &self,
+        session: &SessionRef,
+    ) -> Result<SessionEventState, StorageError> {
+        let mut tx = self.pool().begin().await.map_err(db_error)?;
+        sqlx::query(
+            "INSERT INTO session_state
+                 (session_source, external_session_id, pruned_through_seq,
+                  acked_through_seq, last_committed_seq)
+             VALUES (?1, ?2, 0, 0, 0)
+             ON CONFLICT (session_source, external_session_id) DO NOTHING",
+        )
+        .bind(session.source.as_str())
+        .bind(session.external_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+        let (pruned, acked, committed) = read_state_row(&mut tx, session)
+            .await?
+            .ok_or_else(|| StorageError::Database("ensured session state is missing".into()))?;
+        tx.commit().await.map_err(db_error)?;
+        watermark_state(pruned, acked, committed)
+    }
+
     /// The session's cumulative event watermarks. A session with no events
     /// yet reports the coherent all-zero state; no row is fabricated.
     pub async fn event_state(

@@ -1,0 +1,257 @@
+syntax = "proto3";
+
+package qingluan.terminal.v1;
+
+// S6 production subset. Numbers are assigned so generated clients can be
+// exercised, but the complete v1 protocol is not declared frozen until the
+// consuming S8/S9 slices add and validate their deferred RPCs.
+service TerminalService {
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  rpc AcquireControl(AcquireControlRequest) returns (AcquireControlResponse);
+  rpc RenewControl(RenewControlRequest) returns (RenewControlResponse);
+  rpc ReleaseControl(ReleaseControlRequest) returns (ReleaseControlResponse);
+  rpc Start(StartRequest) returns (StartResponse);
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Tail(TailRequest) returns (TailResponse);
+}
+
+message SessionRef {
+  string source = 1;
+  string external_id = 2;
+}
+
+message TerminalRef {
+  SessionRef session = 1;
+  string terminal_id = 2;
+}
+
+message LogIdentity {
+  TerminalRef terminal = 1;
+  string log_epoch = 2;
+}
+
+message ControlContext {
+  SessionRef session = 1;
+  string control_token = 2;
+}
+
+message TerminalSize {
+  uint32 rows = 1;
+  uint32 columns = 2;
+}
+
+message EnvironmentVariable {
+  string name = 1;
+  string value = 2;
+}
+
+// The wrapper has presence: absent is invalid, while present with no entries
+// is the explicit empty environment. Repeated entries preserve adapter order.
+message EnvironmentSnapshot {
+  repeated EnvironmentVariable entries = 1;
+}
+
+message HistoryPosition {
+  uint64 line = 1;
+  uint64 byte_offset = 2;
+}
+
+message HistoryRange {
+  HistoryPosition earliest = 1;
+  HistoryPosition latest = 2;
+}
+
+message TailPosition {
+  string tail_id = 1;
+  uint64 revision = 2;
+  uint64 byte_offset = 3;
+}
+
+message ReadCursor {
+  LogIdentity log = 1;
+  HistoryPosition next = 2;
+  uint64 end_line = 3;
+}
+
+message QueryLimits {
+  optional uint32 max_lines = 1;
+  optional uint32 max_bytes = 2;
+}
+
+message ExitResult {
+  oneof result {
+    int32 exit_code = 1;
+    int32 signal = 2;
+  }
+}
+
+message ProcessRunning {}
+message ProcessInterrupted {}
+
+message ProcessState {
+  oneof state {
+    ProcessRunning running = 1;
+    ExitResult exited = 2;
+    ProcessInterrupted interrupted = 3;
+  }
+}
+
+message OutputOpen {}
+message OutputEof {}
+message OutputForcedClose {}
+message OutputReadError {}
+message OutputInterrupted {}
+
+message OutputEnd {
+  oneof end {
+    OutputEof eof = 1;
+    OutputForcedClose forced_close = 2;
+    OutputReadError read_error = 3;
+    OutputInterrupted interrupted = 4;
+  }
+}
+
+message OutputState {
+  oneof state {
+    OutputOpen open = 1;
+    OutputEnd closed = 2;
+  }
+}
+
+message TerminalSnapshot {
+  TerminalRef terminal = 1;
+  ProcessState process = 2;
+  OutputState output = 3;
+  bool stopping = 4;
+  TerminalSize size = 5;
+  optional HistoryRange retained_history = 6;
+}
+
+message SessionEventState {
+  uint64 acked_through_seq = 1;
+  uint64 last_committed_seq = 2;
+  uint64 pruned_through_seq = 3;
+}
+
+message LineFragment {
+  HistoryPosition position = 1;
+  string text = 2;
+  bool prefix_omitted = 3;
+  bool suffix_remaining = 4;
+}
+
+enum ReadTruncation {
+  READ_TRUNCATION_UNSPECIFIED = 0;
+  READ_TRUNCATION_BYTE_BUDGET = 1;
+  READ_TRUNCATION_LINE_BUDGET = 2;
+  READ_TRUNCATION_GAP = 3;
+}
+
+message ReadFromEarliest {}
+message ReadFromNewest {}
+
+message ReadResponse {
+  // Always present on a valid response, including a complete empty page;
+  // carries the immutable end_line selected for this read.
+  ReadCursor cursor = 1;
+  repeated LineFragment fragments = 2;
+  optional ReadCursor next = 3;
+  ReadTruncation truncation = 4;
+  optional HistoryRange retained = 5;
+  bool degraded = 6;
+}
+
+message TailSnapshot {
+  LogIdentity log = 1;
+  TailPosition position = 2;
+  string text = 3;
+  bool truncated = 4;
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  string daemon_version = 1;
+  uint32 protocol_major = 2;
+  uint32 protocol_minor = 3;
+  repeated string capabilities = 4;
+}
+
+message AcquireControlRequest {
+  SessionRef session = 1;
+}
+
+message AcquireControlResponse {
+  string control_token = 1;
+  uint64 expires_in_ms = 2;
+  SessionEventState event_state = 3;
+}
+
+message RenewControlRequest {
+  ControlContext control = 1;
+}
+
+message RenewControlResponse {
+  uint64 expires_in_ms = 1;
+}
+
+message ReleaseControlRequest {
+  ControlContext control = 1;
+}
+
+message ReleaseControlResponse {}
+
+message StartRequest {
+  ControlContext control = 1;
+  string program = 2;
+  repeated string args = 3;
+  string cwd = 4;
+  EnvironmentSnapshot env = 5;
+  TerminalSize size = 6;
+}
+
+message StartResponse {
+  string terminal_id = 1;
+}
+
+message SendRequest {
+  ControlContext control = 1;
+  string terminal_id = 2;
+  bytes data = 3;
+}
+
+message SendResponse {
+  uint64 written_bytes = 1;
+}
+
+message StopRequest {
+  ControlContext control = 1;
+  string terminal_id = 2;
+}
+
+message StopResponse {
+  TerminalSnapshot snapshot = 1;
+}
+
+message ReadRequest {
+  TerminalRef terminal = 1;
+  oneof position {
+    ReadFromEarliest earliest = 2;
+    HistoryPosition at = 3;
+    ReadFromNewest newest = 4;
+    ReadCursor cursor = 5;
+  }
+  QueryLimits limits = 6;
+}
+
+message TailRequest {
+  TerminalRef terminal = 1;
+  QueryLimits limits = 2;
+}
+
+message TailResponse {
+  ReadResponse history = 1;
+  TailSnapshot tail = 2;
+}

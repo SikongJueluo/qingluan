@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package qingluan.terminal.v1;
+
+import "qingluan/terminal/v1/terminal.proto";
+
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+  ERROR_REASON_CONTROL_BUSY = 1;
+  ERROR_REASON_CONTROL_EXPIRED = 2;
+  ERROR_REASON_CURSOR_EXPIRED = 3;
+  ERROR_REASON_TERMINAL_NOT_WRITABLE = 4;
+  ERROR_REASON_PARTIAL_WRITE = 5;
+  ERROR_REASON_RESOURCE_EXHAUSTED = 6;
+}
+
+enum QueryKind {
+  QUERY_KIND_UNSPECIFIED = 0;
+  QUERY_KIND_READ = 1;
+  QUERY_KIND_TAIL = 2;
+}
+
+enum WriteAbortReason {
+  WRITE_ABORT_REASON_UNSPECIFIED = 0;
+  WRITE_ABORT_REASON_STOP_INTENT = 1;
+  WRITE_ABORT_REASON_CONTROL_LOST = 2;
+  WRITE_ABORT_REASON_WRITE_DEADLINE = 3;
+  WRITE_ABORT_REASON_SERVICE_SHUTDOWN = 4;
+  WRITE_ABORT_REASON_WRITE_FAILED = 5;
+}
+
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_SESSION_TERMINALS = 1;
+  RESOURCE_KIND_GLOBAL_TERMINALS = 2;
+  RESOURCE_KIND_INPUT_QUEUE = 3;
+}
+
+message ControlBusyDetails {
+  optional uint64 remaining_ms = 1;
+}
+
+message CursorExpiredDetails {
+  QueryKind kind = 1;
+  optional HistoryPosition earliest = 2;
+  optional HistoryRange missing = 3;
+}
+
+message TerminalNotWritableDetails {
+  TerminalRef terminal = 1;
+  optional TerminalSnapshot snapshot = 2;
+}
+
+message PartialWriteDetails {
+  optional uint64 written_bytes = 1;
+  optional WriteAbortReason abort = 2;
+}
+
+message ResourceExhaustedDetails {
+  ResourceKind kind = 1;
+}
+
+message ErrorDetail {
+  ErrorReason reason = 1;
+  oneof payload {
+    ControlBusyDetails control_busy = 2;
+    CursorExpiredDetails cursor_expired = 3;
+    TerminalNotWritableDetails terminal_not_writable = 4;
+    PartialWriteDetails partial_write = 5;
+    ResourceExhaustedDetails resource_exhausted = 6;
+  }
+}

@@ -45,13 +45,15 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::cgroup::{self, DelegatedRoot, TerminalCgroup};
-use crate::error::{RuntimeError, SendError, SendRejection, query_error, storage_error};
+use crate::error::{
+    QuotaScope, RuntimeError, SendError, SendRejection, query_error, storage_error,
+};
 use crate::limits::{
     CGROUP_KILL_WAIT, MAX_SEND_BYTES, OUTPUT_CLOSE_WAIT, OUTPUT_HANDOFF_BYTES, READ_CHUNK,
     ROOT_REAP_WAIT, SendPayload, TASK_JOIN_WAIT, TERM_GRACE, WRITE_DEADLINE, WRITE_QUEUE_CAPACITY,
 };
 use crate::normalize::{Normalizer, PendingLine, TailState};
-use crate::quota::{Quota, SlotId, SlotState};
+use crate::quota::{Quota, QuotaError, SlotId, SlotState};
 use crate::write::{CountedWrite, WriteCoordinator, WriteOutcome, write_bounded};
 
 /// The state published by a terminal's detached cleanup.
@@ -236,12 +238,18 @@ impl Terminal {
         validate_start(&terminal, &spec)?;
 
         let session_key = terminal.session.external_id.as_str().to_owned();
-        let slot = quota
-            .reserve(&session_key)
-            .map_err(|error| RuntimeError::StartRejected {
+        let slot = quota.reserve(&session_key).map_err(|error| match error {
+            QuotaError::SessionExhausted => RuntimeError::QuotaExhausted {
+                scope: QuotaScope::Session,
+            },
+            QuotaError::GlobalExhausted => RuntimeError::QuotaExhausted {
+                scope: QuotaScope::Global,
+            },
+            other => RuntimeError::StartRejected {
                 terminal: terminal.clone(),
-                detail: format!("quota: {error:?}"),
-            })?;
+                detail: format!("quota: {other:?}"),
+            },
+        })?;
 
         // Reserve the durable record first: a crash during spawn leaves a
         // `starting` record that startup recovery marks Interrupted.

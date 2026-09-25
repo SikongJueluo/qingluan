@@ -12,7 +12,8 @@ inputs.qingluan.url = "github:sikongjueluo/qingluan";
 # home-manager
 imports = [ inputs.qingluan.homeManagerModules.qingluan ];
 programs.qingluan = {
-  enable = true;          # qingluan CLI + daemon
+  enable = true;          # 安装 qingluan CLI + daemon
+  daemon.enable = true;   # 可选：启动 Delegate=yes 的 systemd user unit
   desktop.enable = true;  # 可选：Tauri 桌面端
 };
 ```
@@ -22,7 +23,9 @@ NixOS 用 `nixosModules.qingluan`，选项相同。临时体验：`nix run githu
 ## 使用
 
 ```bash
-qingluan daemon start       # 启动 daemon（默认 127.0.0.1:47129；--host 0.0.0.0 监听局域网）
+systemctl --user start qingluan-daemon  # 推荐：带 cgroup delegation 启动
+qingluan daemon start       # 手动启动；当前 scope 必须已获 cgroup delegation
+# 可用 --host 0.0.0.0 监听局域网 HTTP；terminal gRPC 仍仅使用私有 UDS
 qingluan health            # 健康检查
 qingluan workspace list    # workspace 列表
 qingluan workspace add foo # 新建 workspace（默认 ~/Projects/.workspace/<repo>/foo）
@@ -41,6 +44,7 @@ devenv shell      # 开发环境（rust, pnpm, bun, cargo-tauri, cargo-watch）
 just dev          # daemon(watch) + 前端并行
 just tauri-dev    # 桌面端开发模式
 just quality      # 质量门（CI 同款）
+just terminal-grpc-interop # tonic UDS ↔ grpc-js 协议互操作门
 nix build .#qingluan-desktop   # Nix 打包
 ```
 

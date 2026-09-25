@@ -18,15 +18,17 @@ use std::sync::{Arc, Mutex};
 
 use qingluan_core::terminal::{
     ControlGeneration, GrepLimits, GrepPage, GrepRequest, HistoryPosition, LogIdentity, ReadLimits,
-    ReadRequest, ReadResult, SendReceipt, SessionRef, StartSpec, TailPosition, TailView,
-    TerminalId, TerminalRef, TerminalSize, TerminalSnapshot,
+    ReadRequest, ReadResult, SendReceipt, SessionEventState, SessionRef, StartSpec, TailPosition,
+    TailView, TerminalId, TerminalRef, TerminalSize, TerminalSnapshot,
 };
 use qingluan_storage::{LogStore, RuntimeRecord, RuntimeRegistry};
 use tokio::sync::watch;
 
 use crate::cgroup::DelegatedRoot;
 use crate::config::RuntimeConfig;
-use crate::error::{RuntimeError, SendError, SendRejection, storage_error};
+use crate::error::{
+    RuntimeError, SendError, SendRejection, storage_error, storage_error_for_terminal,
+};
 use crate::limits::SHUTDOWN_WAIT;
 use crate::quota::Quota;
 use crate::terminal::{CleanupState, StartRequest, Terminal};
@@ -307,6 +309,32 @@ impl TerminalRuntime {
         handle.resize(generation, size).await
     }
 
+    /// Explicitly create a session's durable all-zero event state on first
+    /// control acquisition, or return its existing watermarks. No control
+    /// token or lease timing enters storage.
+    pub async fn ensure_session(
+        &self,
+        session: &SessionRef,
+    ) -> Result<SessionEventState, RuntimeError> {
+        self.inner
+            .registry
+            .ensure_event_session(session)
+            .await
+            .map_err(storage_error)
+    }
+
+    /// Return a session's event watermarks without creating it.
+    pub async fn session_event_state(
+        &self,
+        session: &SessionRef,
+    ) -> Result<SessionEventState, RuntimeError> {
+        self.inner
+            .registry
+            .event_state(session)
+            .await
+            .map_err(storage_error)
+    }
+
     /// The persisted log identity of one terminal, for minting query
     /// cursors. The terminal row is the authority, so this works for a
     /// terminal with no live handle too.
@@ -315,7 +343,7 @@ impl TerminalRuntime {
             .store
             .log_identity(terminal)
             .await
-            .map_err(storage_error)
+            .map_err(|error| storage_error_for_terminal(error, terminal))
     }
 
     /// Serve one page of a fixed-range read of committed normalized lines.
@@ -329,7 +357,11 @@ impl TerminalRuntime {
     /// malformed request is [`RuntimeError::InvalidQuery`] — never a silent
     /// skip.
     pub async fn read(&self, request: &ReadRequest) -> Result<ReadResult, RuntimeError> {
-        self.inner.store.read(request).await.map_err(storage_error)
+        self.inner
+            .store
+            .read(request)
+            .await
+            .map_err(|error| storage_error_for_terminal(error, &request.log().terminal))
     }
 
     /// Serve one page of a literal grep over committed history, with the
@@ -343,7 +375,7 @@ impl TerminalRuntime {
             .store
             .grep(request, limits)
             .await
-            .map_err(storage_error)
+            .map_err(|error| storage_error_for_terminal(error, &request.query().log().terminal))
     }
 
     /// One consistent cut of a terminal: the newest committed history
@@ -384,6 +416,40 @@ impl TerminalRuntime {
         position: &TailPosition,
     ) -> Result<HistoryPosition, RuntimeError> {
         self.require(terminal)?.resolve_tail(position)
+    }
+
+    /// Commit a stop only while `generation` is still the session's current
+    /// control generation.
+    ///
+    /// For a live terminal, the generation check and the synchronous stop
+    /// latch commit under the same session lock used by generation advances;
+    /// cancellation after this point cannot revoke cleanup. A durable record
+    /// without a live handle has no side effect to commit and is read after
+    /// the check.
+    pub async fn stop_with_generation(
+        &self,
+        terminal: &TerminalRef,
+        generation: ControlGeneration,
+    ) -> Result<TerminalSnapshot, RuntimeError> {
+        let live = {
+            let sessions = self.inner.sessions.lock().expect("sessions");
+            let current = sessions
+                .get(&terminal.session)
+                .copied()
+                .unwrap_or_else(ControlGeneration::first);
+            if current != generation {
+                return Err(RuntimeError::ControlLost(terminal.clone()));
+            }
+            let handle = self.lookup(terminal);
+            if let Some(handle) = &handle {
+                handle.stop();
+            }
+            handle
+        };
+        match live {
+            Some(handle) => Ok(handle.snapshot()),
+            None => self.snapshot(terminal).await,
+        }
     }
 
     /// Commit a stop and return the current snapshot immediately. The

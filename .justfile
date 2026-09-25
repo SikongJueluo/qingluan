@@ -20,13 +20,17 @@ dev:
 
 # Watch mode daemon rebuilds (requires cargo-watch, in devenv packages)
 daemon-watch:
-    cargo watch -w crates/qingluan-daemon -w crates/qingluan-protocol -w crates/qingluan-sandbox -x "run -p qingluan-cli -- daemon start"
+    cargo watch -w crates/qingluan-daemon -w crates/qingluan-protocol -w crates/qingluan-terminal -w crates/qingluan-storage -w proto -x "run -p qingluan-cli -- daemon start"
 
 cli ARGS='':
     cargo run -p qingluan-cli -- {{ARGS}}
 
 check: frontend-dist
     cargo check --workspace
+
+# S6 production-schema tonic ↔ grpc-js interoperability gate.
+terminal-grpc-interop:
+    bash tests/terminal-grpc-interop/run.sh
 
 # Tauri. Invoked from apps/desktop because the tauri CLI finds src-tauri
 # by walking up from cwd (apps/web has no src-tauri ancestor); hooks
@@ -37,7 +41,7 @@ tauri-dev:
 # ── Quality Gate ──
 
 # Full quality gate — Harness / CI entry point. Non-zero exit on failure.
-quality: quality-rust quality-fe
+quality: quality-rust quality-fe terminal-grpc-interop
 
 # Build the frontend bundle so `tauri::generate_context!` (which requires
 # frontendDist to exist) compiles during clippy/test of qingluan-desktop.

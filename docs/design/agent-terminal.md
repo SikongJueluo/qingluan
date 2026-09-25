@@ -191,9 +191,9 @@ TS client 是自行实现的薄通信封装，不是自造网络栈。它不负�
 - Rust 使用 `tonic` 实现 gRPC、`prost` 处理 Protobuf；TS 使用 `@grpc/grpc-js`，由 `ts-proto` 生成类型、编解码及 RPC stub。
 - 构建时静态生成代码，不在运行时加载 `.proto`；手写 TS client 封装异步调用和 session 管理。
 - Rust 与 TS 生成产物均不提交仓库；构建后提供生成类型及编辑器支持。此前建议提交 TS 生成文件未被采纳。
-- 生成必须接入 build/typecheck 的前置流程，不依赖开发者记住额外手动步骤；具体任务命名和构建集成尚未实现。
+- S6 已把 Rust 生成接入 `qingluan-protocol/build.rs`，并用 `just terminal-grpc-interop` 生成、typecheck 测试用 TS stub；生产 TS client 的自动生成前置在 S7 接入。
 - 生成工具采用 protoc，复用 just 统一入口；Rust 使用 tonic/prost 构建工具，TS 使用 ts-proto，首版不引入 Buf。
-- 外部协议定义（如 google.rpc.Status）固定版本随仓库保存，记录来源及许可；构建不临时联网下载协议。生成工具通过现有 Nix/devenv 声明，具体版本与文件尚未落地。
+- `google.rpc.Status` 与 `google.protobuf.Any` 定义已固定版本随仓库保存，来源及许可见 `third_party/README.md`；构建不临时联网下载协议。生成工具已加入 Nix/devenv。
 - TS client 首版面向 Node.js，不承诺浏览器支持。
 - TS 的 64 位整数使用 `bigint`；进入工具 JSON 结果时转换为十进制字符串，避免精度损失。
 - 需要区分未传与零值的字段使用 `optional`；删除字段后保留其编号，避免复用。

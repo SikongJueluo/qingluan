@@ -24,6 +24,12 @@ in
       description = "The qingluan package providing the `qingluan` CLI (with the embedded daemon).";
     };
 
+    daemon.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Whether to install qingluan-daemon as a delegated systemd user service.";
+    };
+
     desktop = {
       enable = lib.mkEnableOption "the Qingluan Tauri desktop app";
 
@@ -46,5 +52,23 @@ in
     environment.systemPackages =
       [ cfg.package ]
       ++ lib.optionals cfg.desktop.enable [ cfg.desktop.package ];
+
+    systemd.user.services.qingluan-daemon = lib.mkIf cfg.daemon.enable {
+      description = "Qingluan agent daemon";
+      after = [ "graphical-session-pre.target" ];
+      wantedBy = [ "default.target" ];
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${cfg.package}/bin/qingluan daemon start";
+        Restart = "on-failure";
+        RestartSec = 2;
+        Delegate = true;
+        KillMode = "mixed";
+        TimeoutStopSec = 120;
+        RuntimeDirectory = "qingluan";
+        RuntimeDirectoryMode = "0700";
+        UMask = "0077";
+      };
+    };
   };
 }

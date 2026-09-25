@@ -92,5 +92,5 @@ mod terminal;
 mod write;
 
 pub use config::RuntimeConfig;
-pub use error::{RuntimeError, SendError, SendRejection};
+pub use error::{QuotaScope, RuntimeError, SendError, SendRejection};
 pub use runtime::TerminalRuntime;

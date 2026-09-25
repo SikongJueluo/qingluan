@@ -71,6 +71,15 @@ impl fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
+/// Which activity quota rejected a terminal start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaScope {
+    /// The owning session reached its terminal limit.
+    Session,
+    /// The daemon-wide terminal limit was reached.
+    Global,
+}
+
 /// Failure of a terminal lifecycle operation.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -84,6 +93,11 @@ pub enum RuntimeError {
     ControlGenerationExhausted,
     /// The terminal no longer accepts input or resize.
     NotWritable(TerminalRef),
+    /// An activity quota rejected the start before any slot was reserved.
+    QuotaExhausted {
+        /// Which independently enforced quota was full.
+        scope: QuotaScope,
+    },
     /// The start transaction failed before the terminal was running.
     StartRejected {
         /// Identity minted for the failed start.
@@ -170,6 +184,9 @@ impl fmt::Display for RuntimeError {
             RuntimeError::ControlGenerationExhausted => {
                 write!(f, "control generation sequence exhausted")
             }
+            RuntimeError::QuotaExhausted { scope } => {
+                write!(f, "{scope:?} terminal quota exhausted")
+            }
             RuntimeError::StartRejected { terminal, detail } => write!(
                 f,
                 "start of terminal {} rejected: {detail}",
@@ -200,6 +217,20 @@ impl fmt::Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {}
+
+/// Map a terminal-scoped storage failure, preserving an unknown terminal as
+/// `UnknownTerminal` rather than misclassifying it as infrastructure loss.
+pub(crate) fn storage_error_for_terminal(
+    error: qingluan_storage::StorageError,
+    terminal: &TerminalRef,
+) -> RuntimeError {
+    match error {
+        qingluan_storage::StorageError::UnknownLog(_) => {
+            RuntimeError::UnknownTerminal(terminal.clone())
+        }
+        other => storage_error(other),
+    }
+}
 
 /// Map a storage failure onto the runtime's public error surface. A query
 /// refusal keeps its domain reason (expiry, gap, or a malformed request);
@@ -232,5 +263,29 @@ pub(crate) fn query_error(error: QueryError) -> RuntimeError {
         other => RuntimeError::InvalidQuery {
             detail: other.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qingluan_core::terminal::{ExternalSessionId, SessionRef, SessionSource, TerminalId};
+
+    #[test]
+    fn unknown_log_remains_a_terminal_not_found_error() {
+        let terminal = TerminalRef {
+            session: SessionRef {
+                source: SessionSource::new("test"),
+                external_id: ExternalSessionId::new("session"),
+            },
+            terminal_id: TerminalId::new("terminal"),
+        };
+        assert!(matches!(
+            storage_error_for_terminal(
+                qingluan_storage::StorageError::UnknownLog("terminal".into()),
+                &terminal,
+            ),
+            RuntimeError::UnknownTerminal(ref unknown) if unknown == &terminal
+        ));
     }
 }

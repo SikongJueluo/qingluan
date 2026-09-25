@@ -18,11 +18,24 @@
 root = "~/Projects/.workspace"   # ← built-in default
 
 [daemon]
-# Listen address. Consumed by: qingluan daemon start (bind) and qingluan
-# health (default --daemon-url). Use 0.0.0.0 to accept LAN connections;
-# the CLI maps that back to 127.0.0.1 for its own client connections.
+# HTTP listen address. Consumed by: qingluan daemon start (bind) and
+# qingluan health (default --daemon-url). Use 0.0.0.0 to accept LAN
+# connections; the CLI maps that back to 127.0.0.1 for local client calls.
+# Terminal gRPC remains local-only on terminal.socket_path.
 host = "127.0.0.1"
 port = 47129
+
+[terminal]
+# Local-only gRPC endpoint and durable terminal state. The parent directory
+# must be private (0700); the socket itself is created as 0600.
+# socket_path = "/run/user/1000/qingluan/daemon.sock"
+# storage_root = "~/.local/state/qingluan/terminal"
+session_limit = 8
+global_limit = 32
+# Must be unique for daemon instances sharing one delegated cgroup scope.
+cgroup_tag = "qingluan-terminal"
+lease_ttl_seconds = 30 # valid range: 1..=86400; clients renew every 10 s
+max_message_bytes = 1048576
 
 [sandbox]
 # NOT yet consumed — schema reserved for the task execution engine.

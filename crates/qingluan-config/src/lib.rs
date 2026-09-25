@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub workspace: WorkspaceConfig,
     pub daemon: DaemonConfig,
+    pub terminal: TerminalConfig,
     pub sandbox: SandboxConfig,
     pub cube: CubeConfig,
 }
@@ -50,8 +51,8 @@ impl Default for WorkspaceConfig {
     }
 }
 
-/// Daemon listen address. Consumed by `qingluan-daemon` and by the CLI's
-/// default `--daemon-url`.
+/// Daemon HTTP listen address. Consumed by `qingluan daemon start` and by
+/// the CLI's default `--daemon-url`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
@@ -64,6 +65,49 @@ impl Default for DaemonConfig {
         Self {
             host: "127.0.0.1".into(),
             port: 47129,
+        }
+    }
+}
+
+/// Local terminal service settings consumed by `qingluan daemon start`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TerminalConfig {
+    /// Unix-domain socket for the terminal gRPC service.
+    pub socket_path: PathBuf,
+    /// Durable terminal database and log root.
+    pub storage_root: PathBuf,
+    /// Maximum occupying terminals per session.
+    pub session_limit: usize,
+    /// Maximum occupying terminals daemon-wide.
+    pub global_limit: usize,
+    /// Manager-owned cgroup directory name inside the delegated unit.
+    pub cgroup_tag: String,
+    /// Server-side control lease lifetime. Clients normally renew every 10 s.
+    pub lease_ttl_seconds: u64,
+    /// Hard transport envelope for one encoded gRPC message.
+    pub max_message_bytes: usize,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        let runtime = dirs::runtime_dir()
+            .or_else(dirs::state_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("qingluan");
+        let storage = dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("qingluan")
+            .join("terminal");
+        Self {
+            socket_path: runtime.join("daemon.sock"),
+            storage_root: storage,
+            session_limit: 8,
+            global_limit: 32,
+            cgroup_tag: "qingluan-terminal".into(),
+            lease_ttl_seconds: 30,
+            max_message_bytes: 1024 * 1024,
         }
     }
 }
@@ -121,6 +165,8 @@ pub fn load_from(global: &Path, project: &Path) -> Result<Config, Box<figment::E
         .extract()
         .map_err(Box::new)?;
     config.workspace.root = expand_tilde(&config.workspace.root);
+    config.terminal.socket_path = expand_tilde(&config.terminal.socket_path);
+    config.terminal.storage_root = expand_tilde(&config.terminal.storage_root);
     Ok(config)
 }
 
@@ -160,6 +206,10 @@ mod tests {
             .expect("defaults load");
         assert_eq!(config.daemon.host, "127.0.0.1");
         assert_eq!(config.daemon.port, 47129);
+        assert_eq!(config.terminal.session_limit, 8);
+        assert_eq!(config.terminal.global_limit, 32);
+        assert_eq!(config.terminal.lease_ttl_seconds, 30);
+        assert_eq!(config.terminal.max_message_bytes, 1024 * 1024);
         assert_eq!(
             config.workspace.root,
             dirs::home_dir()
@@ -180,32 +230,47 @@ port = 47000
 
 [workspace]
 root = "/global/ws"
+
+[terminal]
+session_limit = 4
 "#,
             r#"[daemon]
 port = 48000
+
+[terminal]
+global_limit = 16
 "#,
         )
         .expect("layers merge");
         assert_eq!(config.daemon.port, 48000);
         assert_eq!(config.daemon.host, "127.0.0.1");
+        assert_eq!(config.terminal.session_limit, 4);
+        assert_eq!(config.terminal.global_limit, 16);
         assert_eq!(config.workspace.root, PathBuf::from("/global/ws"));
     }
 
     #[test]
-    fn tilde_in_workspace_root_expands() {
+    fn tilde_paths_expand() {
         let config = load_both(
             r#"[workspace]
 root = "~/Projects/.workspace"
+
+[terminal]
+socket_path = "~/.local/state/qingluan/daemon.sock"
+storage_root = "~/.local/state/qingluan/terminal"
 "#,
             "",
         )
         .expect("tilde config loads");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(config.workspace.root, home.join("Projects/.workspace"));
         assert_eq!(
-            config.workspace.root,
-            dirs::home_dir()
-                .unwrap()
-                .join("Projects")
-                .join(".workspace")
+            config.terminal.socket_path,
+            home.join(".local/state/qingluan/daemon.sock")
+        );
+        assert_eq!(
+            config.terminal.storage_root,
+            home.join(".local/state/qingluan/terminal")
         );
     }
 

@@ -80,6 +80,7 @@
 - 任务相关测试：互操作测试 + unit 文件静态断言（`Delegate=yes` 存在）。
 - 停止条件：tonic/grpc-js 出现探针未覆盖的语义分歧。
 - 回滚／清理：gRPC 为新增入口，既有 HTTP 不动；unit 可整体移除。
+- S6 实现记录：生产面严格停在上述九个 unary RPC；`qingluan-daemon` 同时服务既有 HTTP 与 mode `0600` UDS，租约只驻内存并以 runtime generation 线性化 Start/Send/Stop；Rust UDS 集成、控制权竞态、socket 安全、rich error 与 systemd 静态测试已落地，`just terminal-grpc-interop` 使用固定 grpc-js/ts-proto 版本覆盖 bigint、presence、bytes、未知字段／枚举、deadline、取消与 richer error。
 
 ### S7 TS client
 

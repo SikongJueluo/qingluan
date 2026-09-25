@@ -1,4 +1,28 @@
+//! Wire protocol types.
+//!
+//! Existing HTTP DTOs remain available while the terminal service uses
+//! generated protobuf types under [`terminal::v1`]. Generated types are wire
+//! shapes only: conversion to `qingluan-core` domain values belongs to the
+//! daemon adapter.
+
 use serde::{Deserialize, Serialize};
+
+/// Generated Qingluan protobuf modules.
+pub mod terminal {
+    /// Version 1 terminal service wire types. Field numbers are assigned for
+    /// the S6 implementation but are not declared frozen yet.
+    pub mod v1 {
+        tonic::include_proto!("qingluan.terminal.v1");
+    }
+}
+
+/// Vendored Google RPC carrier types used for richer gRPC errors.
+pub mod google {
+    /// `google.rpc.Status`, generated from the vendored definition.
+    pub mod rpc {
+        tonic::include_proto!("google.rpc");
+    }
+}
 
 /// Unified API response wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]

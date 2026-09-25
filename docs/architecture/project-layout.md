@@ -19,8 +19,8 @@
 | `qingluan-core` | lib | 业务核心，已有 workspace/Pi session 管理；不依赖 Tauri/Axum/CLI/sandbox |
 | `qingluan-config` | lib | 分层配置加载、校验与默认值 |
 | `qingluan-sandbox` | lib | 沙箱执行环境抽象（SandboxProvider trait + Local/Cube 实现） |
-| `qingluan-daemon` | bin | 本地控制平面：任务编排、沙箱管理、事件流 |
-| `qingluan-cli` | bin | 面向人类的操作入口（clap），保留机器可读模式；不是 Agent 的唯一入口 |
+| `qingluan-daemon` | lib | 本地控制平面：HTTP/Web、review 与 terminal gRPC 服务组装 |
+| `qingluan-cli` | bin | 统一入口（含 `qingluan daemon start`），保留机器可读模式 |
 | `qingluan-storage` | lib | 本地 SQLite 持久化（Phase 1: 占位） |
 
 ## Terminal 目标结构（已确认，尚未实现）

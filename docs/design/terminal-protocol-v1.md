@@ -1,17 +1,17 @@
 # Terminal 协议 v1 草案
 
-状态：行为契约已逐轮确认，执行语义已按 Gate A/B/C 运行证据对齐（[技术验证结果](../research/terminal-technical-validation.md)）。字段编号、全部枚举及编码仍未冻结，不是可编译 `.proto`，也不代表批准实现。
+状态：行为契约已逐轮确认，执行语义已按 Gate A/B/C 运行证据对齐（[技术验证结果](../research/terminal-technical-validation.md)）。S6 已实现 `proto/qingluan/terminal/v1/` 下首批九个 unary RPC，并为该最小子集赋号；完整 v1、后续 RPC 与兼容承诺仍未冻结。S8 才加入事件 RPC，S9 才加入观察与清理 RPC。
 
 范围与选型依据：[Agent terminal 设计基线](agent-terminal.md)。两份文档冲突时需回到已确认决策核对，不能用本草案中的候选结构静默覆盖基线。
 
 ## 1. 定位与兼容
 
 - 一个 `TerminalService`，不抽象通用 Session 服务。
-- 使用 proto3 + gRPC over Unix socket；候选 package 为 `qingluan.terminal.v1`，实际命名随 `.proto` 定稿。
+- 使用 proto3 + gRPC over Unix socket；S6 package 为 `qingluan.terminal.v1`。
 - Rust：tonic + prost；Node.js TS：grpc-js + ts-proto；两端均构建时静态生成，生成产物不提交仓库。构建后使用生成类型，不要求为 LSP 支持提交生成代码。
-- 生成接入 build/typecheck 的前置流程，不依赖人工先运行一次；具体构建任务尚未实现。
-- 使用 protoc 与现有 just 组织生成，首版不引入 Buf；Rust 使用 tonic/prost 构建工具、TS 使用 ts-proto。生成工具通过 Nix/devenv 声明。
-- 外部协议定义固定版本随仓库保存，记录来源与许可，构建不临时联网下载；具体工具版本和外部定义文件尚未落地。
+- Rust 生成已接入 `qingluan-protocol/build.rs`；S6 的 TS 生成、typecheck 与跨语言验证由 `just terminal-grpc-interop` 执行。生产 TS client 的生成前置仍属于 S7。
+- 使用 protoc 与现有 just 组织生成，首版不引入 Buf；生成工具已通过 Nix/devenv 声明。
+- `google.rpc.Status` 与 `google.protobuf.Any` 定义已固定版本随仓库保存，来源与许可记录在 `third_party/README.md`；构建不临时下载协议定义。
 - 原有 HTTP 调用暂时保留，terminal 首版不捆绑 CLI/Tauri 整体迁移。
 - GetServerInfo 区分 daemon 软件版本与支持的协议主版本；主版本不兼容则拒绝执行。
 - 同一 v1 优先增量兼容；需要区分缺省与零值的字段使用 optional，删除字段后保留编号，不能重新赋予其他含义。
@@ -110,7 +110,7 @@ QueryLimits { max_lines?, max_bytes? }
 - Stop：停止意图成功提交后由 daemon 负责完成，不因发起者的租约失效、连接断开或 RPC 取消而撤销。旧代际尚未提交的 Stop 则拒绝。
 - Ack 和显式清理同样需要有效代际的有序提交，不能在检查后被新控制端接管时继续提交旧操作。
 
-AcquireControl 的响应包含已保存的事件确认位置及可用范围，使新 client 无需猜测从哪里恢复。获取响应丢失和重复 ReleaseControl 的最终错误分类仍待字段定稿，不据此添加自动抢占或盲目重试。
+AcquireControl 的响应包含已保存的事件确认位置及可用范围，使新 client 无需猜测从哪里恢复。S6 中获取响应丢失后，同一 session 在剩余租期内继续返回 `CONTROL_BUSY`，不自动抢占；重复 ReleaseControl／旧令牌 ReleaseControl 返回 `CONTROL_EXPIRED`，不得据此盲目重试有副作用操作。
 
 ## 5. 执行与顺序
 
@@ -229,7 +229,7 @@ Tail 返回可直接传给 ObserveTerminal 的 ObservationCursor，历史切面�
 
 响应候选：`fragments + next_cursor? + truncation_reason + retained_range`。
 
-首次读取确定 end_line，后续分页不随新输出扩展；固定范围不阻止轮转。Gate C 实测覆盖的是活位置续读：钉在当前末尾的 `(line, byte_offset)` 游标跨后续 append 与轮转仍精确续读（探针 `ReadCursor` 无 `end_line`，报告 §6）；固定 `end_line` 分页不随新输出扩展**尚未经运行验证**，留待[生产实现切片计划](terminal-production-implementation-plan.md) S4 验收。长行按 byte_offset 续读，文本尽量在完整 UTF-8 字符边界截断（跨帧、跨行与跨轮转续读已验证）。
+首次读取必须显式选择 earliest、newest 或具体历史位置；缺失 position 是无效请求，不能隐式回退到 earliest。首次读取确定 end_line，后续分页不随新输出扩展；固定范围不阻止轮转。Gate C 实测覆盖的是活位置续读：钉在当前末尾的 `(line, byte_offset)` 游标跨后续 append 与轮转仍精确续读（探针 `ReadCursor` 无 `end_line`，报告 §6）；固定 `end_line` 分页不随新输出扩展**尚未经运行验证**，留待[生产实现切片计划](terminal-production-implementation-plan.md) S4 验收。长行按 byte_offset 续读，文本尽量在完整 UTF-8 字符边界截断（跨帧、跨行与跨轮转续读已验证）。
 
 历史被轮转／显式清理时，返回游标失效和最早可用位置，不自动跳过。查询期间发生清理也必须明确处理，不能报告一个看似连续但实际缺失的范围。
 
@@ -319,7 +319,7 @@ DeleteTerminalRecord 不级联删除事件，也不要求先清理已确认事�
 - CursorExpiredDetails：使用对应查询类型的恢复位置与缺失范围；未知／无可恢复位置用缺省表示，不构造虚假的零游标。
 - PartialWriteDetails：外层消息存在且包含已知写入量，0 是已知零写入；缺少、未知或畸形详情表示量未知，不能按 proto3 默认值推断零。
 - reason 与 oneof 不匹配、多个相互冲突的本服务详情、载体损坏或内外 status 不一致时，client 保留外层失败结果，将详情视为不可用；不自动重试或自动恢复。
-- 未识别 Any 可忽略，未识别 reason 则按通用失败处理；不把未知详情当成功。错误详情不得包含令牌、环境值或输入内容，并须有尺寸上限。
+- 未识别 Any 可忽略，未识别 reason 则按通用失败处理；不把未知详情当成功。错误详情不得包含令牌、环境值或输入内容。S6 将完整 `google.rpc.Status` 二进制载体上限定为 8 KiB，超限时服务端只保留外层通用失败。
 
 TS client 需要显式从 grpc-js 的 ServiceError.metadata 读取二进制 trailer，再用生成代码解码，不能假定 grpc-js 自动提供 rich error 对象。Rust 可通过 tonic 的 binary details 能力发送编码后的 google.rpc.Status；具体 helper 依赖尚未额外选定。
 

@@ -1,5 +1,6 @@
 {
   lib,
+  protobuf,
   rustPlatform,
   frontend,
   root,
@@ -24,6 +25,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
   '';
 
   cargoLock.lockFile = ../../Cargo.lock;
+
+  nativeBuildInputs = [ protobuf ];
 
   cargoBuildFlags = [
     "--package"

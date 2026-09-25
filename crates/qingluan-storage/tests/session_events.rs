@@ -627,6 +627,41 @@ async fn missing_session_is_all_zero_and_never_fabricates_rows() {
 }
 
 #[tokio::test]
+async fn ensure_event_session_explicitly_creates_one_idempotent_zero_state() {
+    let root = TempRoot::new("ensure-session");
+    let store = RuntimeRegistry::open(&root).await.unwrap();
+    let session = session("pi", "s-ensure");
+
+    for _ in 0..2 {
+        let state = store.ensure_event_session(&session).await.unwrap();
+        assert_eq!(
+            (
+                state.pruned_through_seq(),
+                state.acked_through_seq(),
+                state.last_committed_seq()
+            ),
+            (0, 0, 0)
+        );
+    }
+
+    let pool = raw_pool(&root).await;
+    let state_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM session_state
+         WHERE session_source = 'pi' AND external_session_id = 's-ensure'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let event_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_event")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    assert_eq!(state_rows, 1);
+    assert_eq!(event_rows, 0);
+}
+
+#[tokio::test]
 async fn corrupt_event_row_decoding_is_refused() {
     let root = TempRoot::new("corrupt");
     let store = RuntimeRegistry::open(&root).await.unwrap();
