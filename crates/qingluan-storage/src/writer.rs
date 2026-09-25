@@ -170,6 +170,21 @@ pub struct AppendedLoss {
     pub len: u64,
 }
 
+/// One explicitly recorded normalized-stream loss of line numbers.
+///
+/// Returned by [`LogWriter::record_line_loss`]: the first retired line
+/// number (the line the writer would have used next) and how many were
+/// retired. The range is consumed (its numbers can never be reused) and
+/// recorded as an explicit stream-scoped gap, so a reader accounts for the
+/// missing lines instead of inventing continuity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppendedLineLoss {
+    /// First retired line number.
+    pub first_line: u64,
+    /// Number of retired line numbers.
+    pub lines: u64,
+}
+
 /// The outcome of flushing one stream's pending batch. This is the
 /// durable per-stream outcome owners observe — on [`LogWriter::flush`],
 /// on [`LogWriter::close`], and (for the internal flush driver's
@@ -635,6 +650,46 @@ impl LogWriter {
         .await
     }
 
+    /// Record an explicit normalized-stream loss of `lines` line numbers
+    /// starting at `first_line`, which must be exactly the next line this
+    /// writer would use (`line_watermark + 1`): a loss may consume numbers
+    /// but never skip one.
+    ///
+    /// The bounded line normalizer uses this when one logical line grows
+    /// past the bytes a mutable tail may hold: the bytes it must drop are a
+    /// prefix of a line that does not exist yet, which the frame format
+    /// cannot express (a line is always addressed from offset 0). Retiring
+    /// the line number that content would have used records the loss as an
+    /// explicit stream-scoped gap instead of persisting a truncated suffix
+    /// as if it were a whole line. Any pending normalized batch is
+    /// committed first and the active segment is sealed, so the discarded
+    /// range is not covered by any segment's indexed range; the terminal
+    /// latches `degraded` + `refuse_new_start`, and the numbers are
+    /// consumed (never reused, never silently skipped). `lines == 0` is a
+    /// no-op at the current watermark. Cancellation-safe by construction,
+    /// like [`LogWriter::record_raw_loss`].
+    ///
+    /// The loss itself is *not* a batch: it is reported through its return
+    /// value and the terminal's latches, and it deliberately leaves
+    /// [`LogWriter::last_flush_outcome`] showing the last real **batch**
+    /// outcome of the normalized stream. An owner that has to decide whether
+    /// accepted lines are durable therefore keeps reading the batch that
+    /// this operation committed on its way, instead of mistaking the
+    /// retired range for a dropped batch.
+    pub async fn record_line_loss(
+        &mut self,
+        first_line: u64,
+        lines: u64,
+    ) -> Result<AppendedLineLoss, StorageError> {
+        let shared = Arc::clone(&self.shared);
+        let guard = shared.enter_command();
+        join_command(tokio::spawn(async move {
+            let _registered = guard;
+            record_line_loss_command(shared, first_line, lines).await
+        }))
+        .await
+    }
+
     /// Force a batch boundary: flush both streams' pending batches (each
     /// through its own append → `sync_data` → visibility transaction) and
     /// return once they are durable, with each stream's outcome —
@@ -945,6 +1000,73 @@ async fn record_raw_loss_command(
     shared.raw_watermark.store(end, Ordering::Relaxed);
     shared.record_outcome(LogStream::Raw, StreamFlushOutcome::Dropped);
     Ok(AppendedLoss { offset: start, len })
+}
+
+/// The body of [`LogWriter::record_line_loss`]: commit the accepted lines
+/// into their segment, seal it, then record the retired line numbers as an
+/// explicit gap with the watermark advanced past them.
+async fn record_line_loss_command(
+    shared: Arc<WriterShared>,
+    first_line: u64,
+    lines: u64,
+) -> Result<AppendedLineLoss, StorageError> {
+    let mut state = shared.state.lock().await;
+    if let Some(detail) = &state.normalized.recovery_required {
+        return Err(StorageError::RecoveryRequired {
+            detail: detail.clone(),
+        });
+    }
+    let first = shared
+        .line_watermark
+        .load(Ordering::Relaxed)
+        .checked_add(1)
+        .ok_or_else(|| StorageError::Database("line number space exhausted".into()))?;
+    if first_line != first {
+        // A loss consumes numbers; it never skips one, exactly like an
+        // append.
+        return Err(StorageError::LineNotSequential {
+            attempted: first_line,
+            watermark: first.saturating_sub(1),
+        });
+    }
+    if lines == 0 {
+        return Ok(AppendedLineLoss {
+            first_line: first,
+            lines: 0,
+        });
+    }
+    let last = first
+        .checked_add(lines)
+        .ok_or_else(|| StorageError::Database("line number space exhausted".into()))?
+        - 1;
+    // Flush the accepted lines into the current segment, then seal it, so
+    // the discarded range is not covered by any segment's indexed range.
+    flush_normalized(&shared, &mut state).await?;
+    seal_active(&shared, &mut state, LogStream::Normalized).await?;
+    shared
+        .store
+        .drop_batch(
+            &shared.key,
+            LogStream::Normalized,
+            GapSpan {
+                start: first,
+                end: last + 1,
+                reason: GapReason::Missing,
+            },
+            last,
+        )
+        .await?;
+    state.norm_deadline = None;
+    shared.line_watermark.store(last, Ordering::Relaxed);
+    // The last *batch* outcome of the normalized stream stays observable: a
+    // retired range is not a batch, and reporting it as one would make a
+    // caller believe the pending batch was dropped when it was in fact
+    // committed just above. The loss is observable through its return value
+    // and the terminal's latches.
+    Ok(AppendedLineLoss {
+        first_line: first,
+        lines,
+    })
 }
 
 /// The body of [`LogWriter::flush`]: both streams' batches flushed under

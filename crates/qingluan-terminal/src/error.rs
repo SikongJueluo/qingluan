@@ -2,13 +2,17 @@
 //!
 //! Every variant speaks in core domain types ([`TerminalRef`],
 //! [`PartialWrite`]) or plain text; no storage, sqlx, libc, PTY, or wire
-//! type appears here. A partial write carries the exact known byte count
+//! type appears in a public signature. The crate-private mappers at the
+//! bottom translate storage and query failures into these variants, which is
+//! the only place a storage error is touched. A partial write carries the exact known byte count
 //! and a wire-agnostic [`WriteAbort`](qingluan_core::terminal::WriteAbort)
 //! reason; a refused send carries a typed [`SendRejection`].
 
 use std::fmt;
 
-use qingluan_core::terminal::{PartialWrite, TerminalRef};
+use qingluan_core::terminal::{
+    HistoryPosition, HistoryRange, PartialWrite, QueryError, TerminalRef,
+};
 
 /// Why a send was refused before any byte was handed to the PTY.
 #[non_exhaustive]
@@ -108,6 +112,32 @@ pub enum RuntimeError {
     },
     /// The runtime is shutting down and no longer accepts starts.
     Shutdown,
+    /// A query position is no longer readable: the cursor's log identity or
+    /// epoch no longer matches, the retained history no longer reaches it,
+    /// it falls inside an explicitly recorded gap, or it is an overwritten
+    /// (or still mutable) tail revision. `earliest` is the earliest
+    /// readable position when it is known and `missing` the exact missing
+    /// range when it is known. Recovery is the caller's explicit choice:
+    /// the position is never silently re-anchored.
+    CursorExpired {
+        /// Earliest position still readable, if known.
+        earliest: Option<HistoryPosition>,
+        /// Exact missing range, if known.
+        missing: Option<HistoryRange>,
+    },
+    /// The requested fixed range intersects an explicitly recorded gap; the
+    /// caller must choose the range on the other side, because a scan never
+    /// claims to have covered a hole.
+    QueryGap {
+        /// The missing range.
+        range: HistoryRange,
+    },
+    /// The query is inconsistent (a cursor minted for another log, a scan
+    /// point reused after the needle or options changed, an empty needle).
+    InvalidQuery {
+        /// Human-readable detail.
+        detail: String,
+    },
     /// A non-write lifecycle operation failed at the OS level.
     Io {
         /// Human-readable detail.
@@ -153,6 +183,14 @@ impl fmt::Display for RuntimeError {
             RuntimeError::Storage { detail } => write!(f, "storage error: {detail}"),
             RuntimeError::Cgroup { detail } => write!(f, "cgroup error: {detail}"),
             RuntimeError::Shutdown => write!(f, "runtime is shutting down"),
+            RuntimeError::CursorExpired { earliest, missing } => write!(
+                f,
+                "query position is no longer readable: earliest {earliest:?}, missing {missing:?}"
+            ),
+            RuntimeError::QueryGap { range } => {
+                write!(f, "history is missing in {range:?}")
+            }
+            RuntimeError::InvalidQuery { detail } => write!(f, "invalid query: {detail}"),
             RuntimeError::Io { detail } => write!(f, "io error: {detail}"),
             RuntimeError::ShutdownIncomplete { detail } => {
                 write!(f, "shutdown incomplete: {detail}")
@@ -162,3 +200,37 @@ impl fmt::Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {}
+
+/// Map a storage failure onto the runtime's public error surface. A query
+/// refusal keeps its domain reason (expiry, gap, or a malformed request);
+/// everything else is a storage fault.
+pub(crate) fn storage_error(error: qingluan_storage::StorageError) -> RuntimeError {
+    match error {
+        qingluan_storage::StorageError::Query(QueryError::CursorExpired { earliest, missing }) => {
+            RuntimeError::CursorExpired { earliest, missing }
+        }
+        qingluan_storage::StorageError::Query(QueryError::Gap { range }) => {
+            RuntimeError::QueryGap { range }
+        }
+        qingluan_storage::StorageError::Query(QueryError::Invalid { detail }) => {
+            RuntimeError::InvalidQuery { detail }
+        }
+        other => RuntimeError::Storage {
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// Map a query-value failure onto the runtime's public error surface.
+pub(crate) fn query_error(error: QueryError) -> RuntimeError {
+    match error {
+        QueryError::CursorExpired { earliest, missing } => {
+            RuntimeError::CursorExpired { earliest, missing }
+        }
+        QueryError::Gap { range } => RuntimeError::QueryGap { range },
+        QueryError::Invalid { detail } => RuntimeError::InvalidQuery { detail },
+        other => RuntimeError::InvalidQuery {
+            detail: other.to_string(),
+        },
+    }
+}

@@ -11,9 +11,10 @@ test-hooks = []
 
 [dependencies]
 qingluan-core = { path = "../qingluan-core" }
-# Narrow persistence seam (S2): raw append + explicit raw loss + close. The
-# runtime never touches SQLite, segment frames, or the writer lease directly;
-# everything behind `LogStore`/`LogWriter` stays private to storage.
+# Narrow persistence seam (S2): raw append + explicit raw/normalized loss +
+# fixed-range read/grep/identity query + close. The runtime never touches
+# SQLite, segment frames, or the writer lease directly; everything behind
+# `LogStore`/`LogWriter` stays private to storage.
 qingluan-storage = { path = "../qingluan-storage" }
 # Approved pinned stack (plan §2 / design baseline): PTY allocation, spawn,
 # read, and resize; cgroup/term/signal syscall helpers; raw pidfd/pipe
@@ -22,9 +23,16 @@ libc = "0.2"
 nix = { version = "=0.31.3", features = ["process", "signal", "term", "ioctl"] }
 pty-process = { version = "=0.5.3", features = ["async"] }
 tokio = { workspace = true }
+# Line normalization (S4): the design-pinned escape-sequence parser, plus
+# display-width classification for Chinese wide characters and zero-width
+# combining marks (the parser cannot classify width). Both are pinned
+# exactly; `unicode-width` is already in this workspace's tree as a
+# transitive dependency of `console`/`anstream`.
+unicode-width = "=0.2.2"
 # Qingluan-minted canonical identities: `TerminalId` and `LogEpoch` are
 # canonical UUID text at the storage seam, so the runtime mints them here.
 uuid = { workspace = true }
+vte = "=0.15.0"
 
 [dev-dependencies]
 qingluan-terminal = { path = ".", features = ["test-hooks"] }

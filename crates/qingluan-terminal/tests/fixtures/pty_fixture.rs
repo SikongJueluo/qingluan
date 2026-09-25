@@ -150,6 +150,14 @@ fn main() {
             sleep_forever();
             0
         }
+        "emit" => run_emit(&args),
+        "emit-hold" => {
+            let code = run_emit(&args);
+            if code == 0 {
+                sleep_forever();
+            }
+            code
+        }
         "bytecount" => run_bytecount(&args),
         "exit" => args
             .get(2)
@@ -320,6 +328,33 @@ fn write_identity(path: &str) {
         path,
         format!("pid={pid} sid={sid} pgrp={pgrp} fg={fg} cgroup={cgroup}\n"),
     );
+}
+
+/// Write the bytes decoded from a hex string, so a test can drive exact
+/// control sequences through the PTY.
+fn run_emit(args: &[String]) -> i32 {
+    let hex = args.get(2).cloned().unwrap_or_default();
+    let Some(bytes) = decode_hex(&hex) else {
+        eprintln!("emit expects an even-length hex string");
+        return 64;
+    };
+    let mut out = std::io::stdout();
+    let _ = out.write_all(&bytes);
+    let _ = out.flush();
+    0
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Some(out)
 }
 
 /// Raw-mode read of exactly `N` bytes; the file records the byte count and

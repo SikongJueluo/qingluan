@@ -48,18 +48,14 @@ pub(crate) struct TerminalRow {
     pub line_watermark: u64,
     pub raw_watermark: u64,
     // Written by retention reclamation and recovery's gap latch; read by
-    // the S3/S4 consumers of the retained range and the test-hooks
-    // snapshot (the seam surface that exposes them arrives with those
-    // slices).
-    #[allow(dead_code)]
+    // the query surface (the retained window) and by the test-hooks
+    // snapshot.
     pub retained_first_line: u64,
-    #[allow(dead_code)]
     pub retained_first_offset: u64,
     pub active_normalized_segment: Option<i64>,
     pub active_raw_segment: Option<i64>,
     // Latched (never cleared) by recovery gaps and unsafe reclaims;
-    // observable state for readers, deliberately not a write blocker.
-    #[allow(dead_code)]
+    // reported on every query page, deliberately not a write blocker.
     pub degraded: bool,
     pub refuse_new_start: bool,
 }
@@ -600,7 +596,6 @@ impl Store {
     }
 
     /// All segment rows of one stream, oldest first. Never mixes kinds.
-    #[allow(dead_code)] // test-hooks-only query in production builds
     pub(crate) async fn segments(
         &self,
         key: &LogKey,

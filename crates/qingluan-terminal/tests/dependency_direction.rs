@@ -32,8 +32,18 @@ const FORBIDDEN_IN_TERMINAL: &[&str] = &[
 /// the core domain types, PTY allocation/spawn (`pty-process` 0.5.3), the
 /// cgroup/term/signal helpers (`nix` 0.31.3), raw pidfd/pipe syscalls
 /// (`libc`), and the async runtime for the self-managed `AsyncFd` write
-/// path.
-const REQUIRED_IN_TERMINAL: &[&str] = &["qingluan-core", "libc", "nix", "pty-process", "tokio"];
+/// path. S4 adds the design-pinned escape-sequence parser (`vte` 0.15.0)
+/// and display-width classification (`unicode-width` 0.2.2, already in this
+/// workspace's tree) for Chinese wide characters and combining marks.
+const REQUIRED_IN_TERMINAL: &[&str] = &[
+    "libc",
+    "nix",
+    "pty-process",
+    "qingluan-core",
+    "tokio",
+    "unicode-width",
+    "vte",
+];
 
 /// The full approved dependency set, including the narrow S2 storage seam
 /// (`qingluan-storage`, per the plan's `daemon → terminal → storage → core`
@@ -41,14 +51,16 @@ const REQUIRED_IN_TERMINAL: &[&str] = &["qingluan-core", "libc", "nix", "pty-pro
 /// and the crate's own `test-hooks` self dev-dependency. Any other
 /// dependency is an unapproved widening.
 const APPROVED_IN_TERMINAL: &[&str] = &[
-    "qingluan-core",
-    "qingluan-storage",
-    "qingluan-terminal",
     "libc",
     "nix",
     "pty-process",
+    "qingluan-core",
+    "qingluan-storage",
+    "qingluan-terminal",
     "tokio",
+    "unicode-width",
     "uuid",
+    "vte",
 ];
 
 const FORBIDDEN_IN_STORAGE: &[&str] = &[

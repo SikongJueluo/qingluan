@@ -37,11 +37,18 @@
 //!   generation; a send that stopped early is a typed partial write
 //!   carrying its exact known byte count, classified by a wire-agnostic
 //!   abort reason.
+//! - Query values are checked before they are issued: read limits are
+//!   non-zero and clamped to their hard caps, a complete read page cannot
+//!   carry a continuation, a grep scan point is bound to the exact query
+//!   it came from, and a partial grep scan never claims completeness. A
+//!   degraded log is reported through the page instead of presenting an
+//!   unlocated loss as continuous history.
 
 mod control;
 mod event;
 mod ids;
 mod position;
+mod query;
 mod reason;
 mod send;
 mod snapshot;
@@ -57,6 +64,11 @@ pub use ids::{
 };
 pub use position::{
     HistoryPosition, HistoryRange, ObservationCursor, PositionError, ReadCursor, TailPosition,
+};
+pub use query::{
+    GrepContext, GrepLimits, GrepMatch, GrepPage, GrepQuery, GrepRequest, GrepScanPoint, GrepStop,
+    LimitError, LineFragment, QueryError, ReadLimits, ReadPage, ReadRequest, ReadResult, ReadStart,
+    ReadTruncation, TailSnapshot, TailView,
 };
 pub use reason::ReasonCode;
 pub use send::{PartialWrite, SendReceipt, WriteAbort};

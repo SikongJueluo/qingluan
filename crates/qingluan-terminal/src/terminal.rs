@@ -30,10 +30,13 @@ use std::time::{Duration, Instant};
 
 use pty_process::{Command, OwnedReadPty};
 use qingluan_core::terminal::{
-    ControlGeneration, ExitResult, LogEpoch, LogIdentity, OutputEnd, OutputState, PartialWrite,
-    ProcessState, SendReceipt, StartSpec, TerminalRef, TerminalSize, TerminalSnapshot, WriteAbort,
+    ControlGeneration, ExitResult, HistoryPosition, LogEpoch, LogIdentity, OutputEnd, OutputState,
+    PartialWrite, ProcessState, ReadLimits, ReadRequest, ReadStart, SendReceipt, StartSpec, TailId,
+    TailPosition, TailView, TerminalRef, TerminalSize, TerminalSnapshot, WriteAbort,
 };
-use qingluan_storage::{AppendOutcome, LogStore, LogWriter, RuntimeRegistry};
+use qingluan_storage::{
+    AppendOutcome, LogStore, LogStream, LogWriter, RuntimeRegistry, StreamFlushOutcome,
+};
 use tokio::io::AsyncReadExt;
 use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
@@ -42,11 +45,12 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::cgroup::{self, DelegatedRoot, TerminalCgroup};
-use crate::error::{RuntimeError, SendError, SendRejection};
+use crate::error::{RuntimeError, SendError, SendRejection, query_error, storage_error};
 use crate::limits::{
     CGROUP_KILL_WAIT, MAX_SEND_BYTES, OUTPUT_CLOSE_WAIT, OUTPUT_HANDOFF_BYTES, READ_CHUNK,
     ROOT_REAP_WAIT, SendPayload, TASK_JOIN_WAIT, TERM_GRACE, WRITE_DEADLINE, WRITE_QUEUE_CAPACITY,
 };
+use crate::normalize::{Normalizer, PendingLine, TailState};
 use crate::quota::{Quota, SlotId, SlotState};
 use crate::write::{CountedWrite, WriteCoordinator, WriteOutcome, write_bounded};
 
@@ -99,6 +103,16 @@ enum OutputMessage {
     /// The reader ended; `trailing_gap` are bytes dropped after the last
     /// message.
     End { trailing_gap: u64 },
+    /// A query asked for one consistent cut of committed history plus the
+    /// mutable tail (see [`tail_view`]). Because this message rides the
+    /// same ordered queue as the output bytes, every byte queued before it
+    /// is normalized before the cut is taken, and no later byte can enter
+    /// it. The reply is a plain domain value: no writer, parser, or channel
+    /// type crosses the seam.
+    Checkpoint {
+        limits: ReadLimits,
+        response: oneshot::Sender<Result<TailView, String>>,
+    },
 }
 
 /// Bounded handoff from the reader to the storage sink.
@@ -149,6 +163,12 @@ pub(crate) struct StartRequest {
 /// One live (or completed) terminal.
 pub(crate) struct Terminal {
     terminal: TerminalRef,
+    /// The log identity this terminal's output is persisted under (the
+    /// writer was opened with it, and the query surface resolves it).
+    log: LogIdentity,
+    /// The bounded mutable tail of the normalized stream, shared with the
+    /// output sink and read by the query surface.
+    tail: Arc<Mutex<TailState>>,
     slot: SlotId,
     registry: RuntimeRegistry,
     quota: Arc<Quota>,
@@ -156,6 +176,12 @@ pub(crate) struct Terminal {
     writer_tx: mpsc::Sender<WriterCommand>,
     exit_tx: watch::Sender<bool>,
     output_end_tx: mpsc::UnboundedSender<OutputMessage>,
+    /// Published (or dropped) when the output sink has finished: its
+    /// writer is closed, so every accepted line is durable and the tail can
+    /// no longer change. A tail checkpoint waits on this instead of trusting
+    /// `OutputState::Closed`, which the reader commits before the sink has
+    /// flushed.
+    sink_done: watch::Receiver<SinkOutcome>,
     handoff_queued: Arc<AtomicU64>,
     // Retained for the `test-hooks` degraded accessor; the sink task holds
     // its own clone and is the production reader of this latch.
@@ -355,9 +381,19 @@ impl Terminal {
         let handoff_queued = Arc::new(AtomicU64::new(0));
         let degraded = Arc::new(AtomicBool::new(false));
         let (cleanup_tx, _cleanup_rx) = watch::channel(CleanupState::Pending);
+        let (sink_done_tx, sink_done_rx) = watch::channel(SinkOutcome::Running);
+        // The mutable tail continues the log exactly where the writer is:
+        // line numbers are never reused across a restart.
+        let tail = Arc::new(Mutex::new(TailState::new(
+            log_identity.clone(),
+            TailId::new(uuid::Uuid::now_v7().to_string()),
+            writer.line_watermark().saturating_add(1),
+        )));
 
         let terminal_state = Arc::new(Terminal {
             terminal,
+            log: log_identity.clone(),
+            tail: Arc::clone(&tail),
             slot,
             registry: registry.clone(),
             quota: Arc::clone(quota),
@@ -365,6 +401,7 @@ impl Terminal {
             writer_tx,
             exit_tx: exit_tx.clone(),
             output_end_tx: output_end_tx.clone(),
+            sink_done: sink_done_rx.clone(),
             handoff_queued: Arc::clone(&handoff_queued),
             degraded: Arc::clone(&degraded),
             child: Mutex::new(Some(child)),
@@ -401,9 +438,20 @@ impl Terminal {
             .replace(reader_task);
 
         let sink_task = {
-            let queued = Arc::clone(&handoff_queued);
-            let degraded = Arc::clone(&degraded);
-            tokio::spawn(async move { run_output_sink(writer, output_rx, queued, degraded).await })
+            let sink = OutputSink {
+                writer,
+                // The sink owns a handle to the same store the runtime
+                // reads through, so a checkpoint can read history and
+                // sample the tail inside one order.
+                store: store.clone(),
+                log: log_identity,
+                queued: Arc::clone(&handoff_queued),
+                degraded: Arc::clone(&degraded),
+                unaccounted: Arc::new(AtomicBool::new(false)),
+                tail,
+                done: sink_done_tx,
+            };
+            tokio::spawn(async move { sink.run(output_rx).await })
         };
         terminal_state
             .sink_handle
@@ -467,6 +515,43 @@ impl Terminal {
     /// The terminal's identity.
     pub(crate) fn reference(&self) -> &TerminalRef {
         &self.terminal
+    }
+
+    /// One consistent cut of this terminal's committed history plus its
+    /// mutable tail (see [`sink_tail_cut`]): the request is queued behind
+    /// the output the reader already handed over, and the sink takes the
+    /// cut in its own single-threaded order.
+    pub(crate) async fn tail_view(
+        &self,
+        store: &LogStore,
+        limits: ReadLimits,
+    ) -> Result<TailView, RuntimeError> {
+        sink_tail_cut(
+            &self.output_end_tx,
+            &self.sink_done,
+            store,
+            &self.log,
+            &self.tail,
+            limits,
+        )
+        .await
+    }
+
+    /// Resolve an old tail position onto the stable history line it became.
+    /// An overwritten revision, an unknown tail, or an offset inside an
+    /// omitted prefix is an explicit expiry, never a silent splice.
+    pub(crate) fn resolve_tail(
+        &self,
+        position: &TailPosition,
+    ) -> Result<HistoryPosition, RuntimeError> {
+        self.tail
+            .lock()
+            .expect("tail state")
+            .resolve(position)
+            .ok_or(RuntimeError::CursorExpired {
+                earliest: None,
+                missing: None,
+            })
     }
 
     /// Whether the output sink latched degraded.
@@ -910,46 +995,435 @@ async fn run_reader(terminal: Arc<Terminal>, mut reader: OwnedReadPty) {
     terminal.record_output_end(end).await;
 }
 
-async fn run_output_sink(
-    mut writer: LogWriter,
-    mut receiver: mpsc::UnboundedReceiver<OutputMessage>,
+/// How the output sink ended, as far as a later query may rely on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SinkOutcome {
+    /// The sink is still running.
+    Running,
+    /// The sink ended after a *verified* close: its writer closed
+    /// successfully and every normalized line it accepted is either
+    /// committed or explicitly recorded as a dropped gap. The frozen state
+    /// is a consistent cut on its own.
+    Durable,
+    /// The sink ended without that verification — a failed close, a panic,
+    /// an aborted task, or normalized data that was neither committed nor
+    /// recorded as dropped. The frozen state must not be served as a cut.
+    Unverified,
+}
+
+/// Everything the output sink owns: the writer it persists through, the
+/// store it may read back for a consistent cut, and the shared liveness
+/// handles of the terminal.
+struct OutputSink {
+    writer: LogWriter,
+    /// The same store the runtime reads through, so a checkpoint can read
+    /// committed history and sample the tail inside one message order.
+    store: LogStore,
+    log: LogIdentity,
     queued: Arc<AtomicU64>,
+    /// The sink gave up persisting (a failure or an accounted drop): live
+    /// cuts are refused and nothing more is appended.
     degraded: Arc<AtomicBool>,
-) -> Result<(), String> {
-    while let Some(message) = receiver.recv().await {
-        match message {
-            OutputMessage::Bytes { gap_before, bytes } => {
-                if gap_before > 0
-                    && !degraded.load(Ordering::SeqCst)
-                    && writer.record_raw_loss(gap_before).await.is_err()
-                {
-                    degraded.store(true, Ordering::SeqCst);
-                }
-                if !degraded.load(Ordering::SeqCst) {
-                    match writer.append_raw(&bytes).await {
-                        Ok(appended) => {
-                            if matches!(appended.outcome, AppendOutcome::Dropped) {
-                                degraded.store(true, Ordering::SeqCst);
-                            }
+    /// Some normalized line was neither committed nor explicitly recorded
+    /// as a dropped gap, so the frozen final state is not a verified cut.
+    unaccounted: Arc<AtomicBool>,
+    tail: Arc<Mutex<TailState>>,
+    /// Published when this sink has finished, and how.
+    done: watch::Sender<SinkOutcome>,
+}
+
+impl OutputSink {
+    async fn run(
+        mut self,
+        mut receiver: mpsc::UnboundedReceiver<OutputMessage>,
+    ) -> Result<(), String> {
+        // The guard fires on every exit path — a panic or an aborted task
+        // included — and marks the end unverified unless this function
+        // published a verified close itself, so a waiting query is never
+        // left hanging and never falls back onto an unverified state.
+        let _finish = SinkFinish(self.done.clone());
+        let mut normalizer = Normalizer::new(Arc::clone(&self.tail));
+        while let Some(message) = receiver.recv().await {
+            match message {
+                OutputMessage::Bytes { gap_before, bytes } => {
+                    if gap_before > 0 {
+                        // The raw archival stream records the exact loss
+                        // (unchanged behavior).
+                        if !self.degraded.load(Ordering::SeqCst)
+                            && self.writer.record_raw_loss(gap_before).await.is_err()
+                        {
+                            self.degraded.store(true, Ordering::SeqCst);
                         }
-                        Err(_) => degraded.store(true, Ordering::SeqCst),
+                        // The dropped bytes may have contained line breaks,
+                        // so the normalized stream's continuity is not
+                        // knowable: commit the bytes that really were
+                        // written and leave the loss to the terminal's
+                        // explicit degraded latch instead of inventing a
+                        // normalized line count.
+                        normalizer.discontinuity();
+                    }
+                    if !self.degraded.load(Ordering::SeqCst) {
+                        match self.writer.append_raw(&bytes).await {
+                            Ok(appended) => {
+                                if matches!(appended.outcome, AppendOutcome::Dropped) {
+                                    self.degraded.store(true, Ordering::SeqCst);
+                                }
+                            }
+                            Err(_) => self.degraded.store(true, Ordering::SeqCst),
+                        }
+                    }
+                    normalizer.feed(&bytes);
+                    drain_normalized(
+                        &mut normalizer,
+                        &mut self.writer,
+                        &self.degraded,
+                        &self.unaccounted,
+                    )
+                    .await;
+                    self.queued.fetch_sub(bytes.len() as u64, Ordering::SeqCst);
+                }
+                OutputMessage::Checkpoint { limits, response } => {
+                    let view = self.checkpoint(&mut normalizer, limits).await;
+                    let _ = response.send(view);
+                }
+                OutputMessage::End { trailing_gap } => {
+                    if trailing_gap > 0 && !self.degraded.load(Ordering::SeqCst) {
+                        let _ = self.writer.record_raw_loss(trailing_gap).await;
+                        normalizer.discontinuity();
+                    }
+                    // The end of output fixes a non-empty tail as exactly
+                    // one history line, whichever way the output ended (a
+                    // trailing LF-less line is real output, not a
+                    // fabricated line).
+                    normalizer.finish();
+                    drain_normalized(
+                        &mut normalizer,
+                        &mut self.writer,
+                        &self.degraded,
+                        &self.unaccounted,
+                    )
+                    .await;
+                    break;
+                }
+            }
+        }
+        // The close is the last durability route: it drains and reports each
+        // stream's final outcome (its own last batch-bearing outcome when the
+        // final drain found nothing). Only *that* result, with no
+        // unaccounted normalized data, may publish a durable finish; anything
+        // else leaves the mappings unpublished and the end unverified.
+        let closed = self.writer.close().await;
+        match &closed {
+            Ok(outcomes) => {
+                apply_durability(
+                    &mut normalizer,
+                    outcomes.normalized,
+                    StreamFlushOutcome::Nothing,
+                    &self.degraded,
+                    &self.unaccounted,
+                );
+                if self.unaccounted.load(Ordering::SeqCst) {
+                    self.done.send_replace(SinkOutcome::Unverified);
+                } else {
+                    self.done.send_replace(SinkOutcome::Durable);
+                }
+            }
+            Err(_) => {
+                self.done.send_replace(SinkOutcome::Unverified);
+            }
+        }
+        closed.map(|_| ()).map_err(|error| error.to_string())
+    }
+
+    /// Serve one consistent cut: the newest committed history plus the
+    /// mutable tail, with every line in exactly one of the two.
+    ///
+    /// Everything the reader queued before this checkpoint has already been
+    /// normalized by this sink, and this sink is the only producer of both
+    /// the history and the tail. Committing the pending batch first is what
+    /// makes the halves a partition: a finalized line that was still only
+    /// buffered would be in neither the committed history nor the mutable
+    /// tail. Nothing runs between the flush, the read, and the sample, so no
+    /// later byte can enter the cut.
+    ///
+    /// A degraded sink refuses instead of answering: its persistence is
+    /// broken, so a cut of it could no longer be guaranteed to be a
+    /// partition. A batch the writer had to *drop* is different: its range
+    /// was recorded as an explicit gap, its numbers are consumed, and the
+    /// returned page reports `degraded`, so those lines are declared missing
+    /// rather than silently absent from the cut.
+    async fn checkpoint(
+        &mut self,
+        normalizer: &mut Normalizer,
+        limits: ReadLimits,
+    ) -> Result<TailView, String> {
+        drain_normalized(
+            normalizer,
+            &mut self.writer,
+            &self.degraded,
+            &self.unaccounted,
+        )
+        .await;
+        if self.degraded.load(Ordering::SeqCst) {
+            return Err("output sink is degraded; the history is not complete".to_owned());
+        }
+        match self.writer.flush().await {
+            Ok(outcomes) => {
+                apply_durability(
+                    normalizer,
+                    outcomes.normalized,
+                    self.writer.last_flush_outcome(LogStream::Normalized),
+                    &self.degraded,
+                    &self.unaccounted,
+                );
+                if self.degraded.load(Ordering::SeqCst) {
+                    return Err("output sink is degraded; the history is not complete".to_owned());
+                }
+            }
+            Err(error) => {
+                self.degraded.store(true, Ordering::SeqCst);
+                self.unaccounted.store(true, Ordering::SeqCst);
+                return Err(error.to_string());
+            }
+        }
+        // The read mints its fixed end line at the watermark that flush just
+        // committed.
+        let request = ReadRequest::first(self.log.clone(), Some(ReadStart::Newest), limits)
+            .map_err(|error| error.to_string())?;
+        let history = self
+            .store
+            .read(&request)
+            .await
+            .map_err(|error| error.to_string())?;
+        // Sampled in this sink's own order, immediately after the committed
+        // history it complements.
+        let tail = normalizer.snapshot();
+        Ok(TailView::new(history, tail))
+    }
+}
+
+/// Marks the sink's end as **unverified** unless the sink published a
+/// verified finish itself.
+///
+/// It fires on every exit path, including a panic or an aborted task — and
+/// that is exactly the case where the writer's pending batch may never have
+/// been closed durably. A failed `close` is published as `Unverified` by
+/// [`OutputSink::run`] itself; a panic, an abort, or an early return is
+/// downgraded here.
+struct SinkFinish(watch::Sender<SinkOutcome>);
+
+impl Drop for SinkFinish {
+    fn drop(&mut self) {
+        let _ = self.0.send_if_modified(|state| {
+            if *state == SinkOutcome::Running {
+                *state = SinkOutcome::Unverified;
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+/// Serve one consistent cut of `log`'s committed history plus its mutable
+/// tail.
+///
+/// The checkpoint message rides the sink's ordered output queue, so it
+/// observes every byte the reader handed over before the request even
+/// reached the terminal. When the sink has finished instead of answering,
+/// its **published finish state** decides: only a verified durable close
+/// (every accepted line committed or recorded as dropped) may be read as a
+/// cut. A failed close, a panic, an aborted task, or unaccounted normalized
+/// data yields [`RuntimeError::Storage`] instead — a supposedly consistent
+/// fallback is never served from an unverified state. `OutputState::Closed`
+/// is deliberately not used for this, because the reader commits it before
+/// the sink has flushed.
+///
+/// Cancellation needs no cleanup: this function holds no lock and pauses no
+/// task, so dropping it simply drops the reply channel.
+async fn sink_tail_cut(
+    output_end_tx: &mpsc::UnboundedSender<OutputMessage>,
+    sink_done: &watch::Receiver<SinkOutcome>,
+    store: &LogStore,
+    log: &LogIdentity,
+    tail: &Arc<Mutex<TailState>>,
+    limits: ReadLimits,
+) -> Result<TailView, RuntimeError> {
+    let (response, receiver) = oneshot::channel();
+    if output_end_tx
+        .send(OutputMessage::Checkpoint { limits, response })
+        .is_ok()
+    {
+        let mut done = sink_done.clone();
+        let outcome = tokio::select! {
+            reply = receiver => match reply {
+                Ok(Ok(view)) => return Ok(view),
+                Ok(Err(detail)) => return Err(RuntimeError::Storage { detail }),
+                // The reply was dropped, which only the sink task's end
+                // does: its published finish state is the authority.
+                Err(_) => *done.borrow(),
+            },
+            outcome = sink_finished(&mut done) => outcome,
+        };
+        require_durable_finish(outcome)?;
+    } else {
+        // The sink is already gone; only its published finish state can be
+        // trusted.
+        require_durable_finish(*sink_done.borrow())?;
+    }
+    // The sink finished durably: its writer closed (so every accepted line
+    // is durable or explicitly dropped) and it is the only mutator of the
+    // tail, which makes a plain read plus snapshot a consistent cut.
+    let request =
+        ReadRequest::first(log.clone(), Some(ReadStart::Newest), limits).map_err(query_error)?;
+    let history = store.read(&request).await.map_err(storage_error)?;
+    let snapshot = tail.lock().expect("tail state").snapshot();
+    Ok(TailView::new(history, snapshot))
+}
+
+/// Only a verified, durable finish may be read as a consistent cut.
+fn require_durable_finish(outcome: SinkOutcome) -> Result<(), RuntimeError> {
+    if outcome == SinkOutcome::Durable {
+        return Ok(());
+    }
+    Err(RuntimeError::Storage {
+        detail: "output sink ended without a verified durable close; the frozen \
+                 history is not a verified cut"
+            .to_owned(),
+    })
+}
+
+/// Wait until the sink has published how it ended. A `Running` result means
+/// every sender is gone without a publication, which no path in this crate
+/// does; it is reported as-is so the caller refuses rather than falls back.
+async fn sink_finished(done: &mut watch::Receiver<SinkOutcome>) -> SinkOutcome {
+    loop {
+        let current = *done.borrow_and_update();
+        if current != SinkOutcome::Running {
+            return current;
+        }
+        if done.changed().await.is_err() {
+            return *done.borrow();
+        }
+    }
+}
+
+/// Persist everything the normalizer produced, in order: each finalized line
+/// keeps its stable number, each retired number is recorded as an explicit
+/// loss, and a line's tail mapping is published **only when a durability
+/// proof arrives** — never merely because the writer accepted the line.
+///
+/// Durability routes handled here:
+///
+/// - a size-bound append reports [`AppendOutcome::Committed`], which makes
+///   the whole batch (this line and every buffered line before it) durable;
+/// - an append that is still [`AppendOutcome::Buffered`] proves nothing, so
+///   the mapping stays private until a flush or a commit proves it;
+/// - [`AppendOutcome::Dropped`] means the batch was recorded as an explicit
+///   gap: its lines do not exist, so its mappings expire;
+/// - recording a loss flushes the pending batch first, so the writer's most
+///   recent batch-bearing outcome is the proof for the waiting mappings.
+///
+/// A failure (or a line skipped because the sink already gave up) is
+/// *unaccounted*: the normalized stream produced a line that was neither
+/// committed nor recorded as dropped, which later forbids a frozen-state
+/// fallback.
+async fn drain_normalized(
+    normalizer: &mut Normalizer,
+    writer: &mut LogWriter,
+    degraded: &AtomicBool,
+    unaccounted: &AtomicBool,
+) {
+    while let Some(item) = normalizer.next_pending() {
+        if degraded.load(Ordering::SeqCst) {
+            // Persistence already failed: this accepted line is neither
+            // committed nor recorded as dropped, so its mapping stays
+            // private and the frozen state can never be served as a cut.
+            unaccounted.store(true, Ordering::SeqCst);
+            continue;
+        }
+        match item {
+            PendingLine::Line { line, text } => match writer.append_line(line, &text).await {
+                Ok(appended) => match appended.outcome {
+                    // The batch bound was reached: everything accepted so
+                    // far is durable.
+                    AppendOutcome::Committed => normalizer.mappings_committed(),
+                    // Not durable yet: the mapping stays private.
+                    AppendOutcome::Buffered => {}
+                    // Durably dropped as an explicit gap: the lines do not
+                    // exist, so their mappings expire.
+                    AppendOutcome::Dropped => {
+                        degraded.store(true, Ordering::SeqCst);
+                        normalizer.mappings_dropped();
+                    }
+                },
+                Err(_) => {
+                    degraded.store(true, Ordering::SeqCst);
+                    unaccounted.store(true, Ordering::SeqCst);
+                }
+            },
+            PendingLine::Loss { first_line, lines } => {
+                match writer.record_line_loss(first_line, lines).await {
+                    Ok(_) => {
+                        // Recording a loss commits the pending batch on its
+                        // way, so the writer's most recent batch-bearing
+                        // outcome is the durability proof.
+                        apply_durability(
+                            normalizer,
+                            StreamFlushOutcome::Nothing,
+                            writer.last_flush_outcome(LogStream::Normalized),
+                            degraded,
+                            unaccounted,
+                        );
+                    }
+                    Err(_) => {
+                        degraded.store(true, Ordering::SeqCst);
+                        unaccounted.store(true, Ordering::SeqCst);
                     }
                 }
-                queued.fetch_sub(bytes.len() as u64, Ordering::SeqCst);
-            }
-            OutputMessage::End { trailing_gap } => {
-                if trailing_gap > 0 && !degraded.load(Ordering::SeqCst) {
-                    let _ = writer.record_raw_loss(trailing_gap).await;
-                }
-                break;
             }
         }
     }
-    writer
-        .close()
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+}
+
+/// Turn an observed normalized-stream outcome into the mapping state it
+/// proves.
+///
+/// `observed` is the outcome of the batch-bearing operation just performed;
+/// [`StreamFlushOutcome::Nothing`] means that operation had no batch of its
+/// own, so the batch containing the waiting mappings was ended earlier (the
+/// 50 ms deadline driver, a size-bound append, or a previous close) and
+/// `last_batch` — the writer's most recent batch-bearing outcome — is the
+/// authority.
+fn apply_durability(
+    normalizer: &mut Normalizer,
+    observed: StreamFlushOutcome,
+    last_batch: StreamFlushOutcome,
+    degraded: &AtomicBool,
+    unaccounted: &AtomicBool,
+) {
+    let settled = if observed == StreamFlushOutcome::Nothing {
+        last_batch
+    } else {
+        observed
+    };
+    match settled {
+        StreamFlushOutcome::Committed => normalizer.mappings_committed(),
+        StreamFlushOutcome::Dropped => {
+            degraded.store(true, Ordering::SeqCst);
+            normalizer.mappings_dropped();
+        }
+        // No batch-bearing flush was ever recorded for the normalized stream:
+        // that proves nothing, so nothing is published. A mapping is then
+        // waiting for a proof that cannot come, which makes its line
+        // unaccounted for — but only when something really is waiting (a
+        // loss recorded before any line was accepted has none).
+        StreamFlushOutcome::Nothing => {
+            if normalizer.has_pending_mappings() {
+                unaccounted.store(true, Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 async fn run_monitor(terminal: Arc<Terminal>) {
@@ -1236,5 +1710,981 @@ impl Rollback {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    //! End-to-end tests of the normalization pipeline into the storage
+    //! seam: bytes are fed exactly as the reader would hand them over, the
+    //! sink drains them into a real `LogWriter`, and the result is queried
+    //! through the public storage surface. They need no PTY and no cgroup,
+    //! so the normalization contract stays verified even where cgroup
+    //! delegation is unavailable.
+
+    use super::*;
+    use qingluan_core::terminal::{
+        ExternalSessionId, GrepLimits, GrepQuery, GrepRequest, HistoryPosition, LogEpoch,
+        QueryError, ReadLimits, ReadRequest, ReadStart, SessionRef, SessionSource, TerminalId,
+    };
+    use qingluan_storage::{LogStore, StorageError};
+
+    use crate::limits::TAIL_MAX_BYTES;
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(tag: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("ql-terminal-s4-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            TempRoot(path)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn identity() -> LogIdentity {
+        LogIdentity {
+            terminal: TerminalRef {
+                session: SessionRef {
+                    source: SessionSource::new("test"),
+                    external_id: ExternalSessionId::new("s1"),
+                },
+                terminal_id: TerminalId::new(uuid::Uuid::now_v7().to_string()),
+            },
+            log_epoch: LogEpoch::new(uuid::Uuid::now_v7().to_string()),
+        }
+    }
+
+    fn pos(line: u64, byte_offset: u64) -> HistoryPosition {
+        HistoryPosition::new(line, byte_offset).expect("valid position")
+    }
+
+    fn start_at(line: u64) -> Option<ReadStart> {
+        Some(ReadStart::At(pos(line, 0)))
+    }
+
+    /// The outcome of running the normalization pipeline over a byte
+    /// stream: the tail state after the end of output, and the history
+    /// position the last mutable revision resolved to (if it resolved).
+    struct Outcome {
+        tail: Arc<Mutex<TailState>>,
+        resolved: Option<HistoryPosition>,
+    }
+
+    /// Run the sink's normalization over `chunks`, then the end of output,
+    /// against a real writer of `store`. Durability is reconciled exactly the
+    /// way the sink does it, so the mapping assertions are about the
+    /// production rule and not about the helper.
+    async fn normalize(store: &LogStore, log: &LogIdentity, chunks: &[&[u8]]) -> Outcome {
+        let mut writer = store.open_writer(log).await.expect("writer");
+        let tail = Arc::new(Mutex::new(TailState::new(
+            log.clone(),
+            TailId::new("pipeline-tail"),
+            writer.line_watermark() + 1,
+        )));
+        let degraded = Arc::new(AtomicBool::new(false));
+        let unaccounted = Arc::new(AtomicBool::new(false));
+        let mut normalizer = Normalizer::new(Arc::clone(&tail));
+        let mut last = None;
+        for chunk in chunks {
+            normalizer.feed(chunk);
+            drain_normalized(&mut normalizer, &mut writer, &degraded, &unaccounted).await;
+            last = Some(tail.lock().unwrap().snapshot().position().clone());
+        }
+        normalizer.finish();
+        drain_normalized(&mut normalizer, &mut writer, &degraded, &unaccounted).await;
+        let before_close = last
+            .as_ref()
+            .and_then(|position| tail.lock().unwrap().resolve(position));
+        let closed = writer.close().await.expect("close");
+        // The close is the durability proof for the final buffered batch.
+        apply_durability(
+            &mut normalizer,
+            closed.normalized,
+            StreamFlushOutcome::Nothing,
+            &degraded,
+            &unaccounted,
+        );
+        let resolved = last
+            .as_ref()
+            .and_then(|position| tail.lock().unwrap().resolve(position));
+        assert!(!degraded.load(Ordering::SeqCst), "storage stayed healthy");
+        assert!(
+            !unaccounted.load(Ordering::SeqCst),
+            "storage stayed healthy"
+        );
+        if before_close.is_some() {
+            assert_eq!(
+                before_close, resolved,
+                "a mapping that resolved before the close proves nothing new"
+            );
+        }
+        Outcome { tail, resolved }
+    }
+
+    /// Read every committed history line, collapsing a line that spans
+    /// fragments. A leading explicit loss is skipped by restarting at the
+    /// earliest readable position the refusal reports.
+    async fn history(store: &LogStore, log: &LogIdentity) -> Vec<(u64, String)> {
+        let mut request =
+            ReadRequest::first(log.clone(), Some(ReadStart::Earliest), ReadLimits::DEFAULT)
+                .expect("request");
+        let mut out: Vec<(u64, String)> = Vec::new();
+        loop {
+            let result = match store.read(&request).await {
+                Ok(result) => result,
+                Err(StorageError::Query(QueryError::CursorExpired { earliest, .. })) => {
+                    let start = earliest.expect("an earliest readable position");
+                    request = ReadRequest::first(
+                        log.clone(),
+                        Some(ReadStart::At(start)),
+                        ReadLimits::DEFAULT,
+                    )
+                    .expect("request");
+                    continue;
+                }
+                Err(other) => panic!("read: {other}"),
+            };
+            for fragment in result.page().fragments() {
+                match out.last_mut() {
+                    Some((line, text)) if *line == fragment.position().line() => {
+                        text.push_str(fragment.text());
+                    }
+                    _ => out.push((fragment.position().line(), fragment.text().to_owned())),
+                }
+            }
+            match result.page().next() {
+                Some(next) => request = ReadRequest::resume(next.clone(), ReadLimits::DEFAULT),
+                None => return out,
+            }
+        }
+    }
+
+    /// Drives the real output sink exactly the way the PTY reader does
+    /// (bounded-handoff messages plus an end), and asks it for tail cuts
+    /// through the same function the runtime uses. No PTY and no cgroup, so
+    /// the ordering contract is testable deterministically.
+    struct Sink {
+        store: LogStore,
+        log: LogIdentity,
+        tx: mpsc::UnboundedSender<OutputMessage>,
+        queued: Arc<AtomicU64>,
+        done: watch::Receiver<SinkOutcome>,
+        degraded: Arc<AtomicBool>,
+        unaccounted: Arc<AtomicBool>,
+        tail: Arc<Mutex<TailState>>,
+        handle: Option<JoinHandle<Result<(), String>>>,
+    }
+
+    impl Sink {
+        async fn new(store: &LogStore, log: &LogIdentity) -> Sink {
+            let writer = store.open_writer(log).await.expect("writer");
+            let tail = Arc::new(Mutex::new(TailState::new(
+                log.clone(),
+                TailId::new("sink-harness"),
+                writer.line_watermark() + 1,
+            )));
+            let (tx, rx) = mpsc::unbounded_channel::<OutputMessage>();
+            let (done_tx, done) = watch::channel(SinkOutcome::Running);
+            let queued = Arc::new(AtomicU64::new(0));
+            let degraded = Arc::new(AtomicBool::new(false));
+            let unaccounted = Arc::new(AtomicBool::new(false));
+            let sink = OutputSink {
+                writer,
+                store: store.clone(),
+                log: log.clone(),
+                queued: Arc::clone(&queued),
+                degraded: Arc::clone(&degraded),
+                unaccounted: Arc::clone(&unaccounted),
+                tail: Arc::clone(&tail),
+                done: done_tx,
+            };
+            let handle = tokio::spawn(async move { sink.run(rx).await });
+            Sink {
+                store: store.clone(),
+                log: log.clone(),
+                tx,
+                queued,
+                done,
+                degraded,
+                unaccounted,
+                tail,
+                handle: Some(handle),
+            }
+        }
+
+        /// Hand bytes over exactly as the reader's bounded handoff does.
+        fn bytes(&self, bytes: &[u8]) {
+            self.queued.fetch_add(bytes.len() as u64, Ordering::SeqCst);
+            self.tx
+                .send(OutputMessage::Bytes {
+                    gap_before: 0,
+                    bytes: bytes.to_vec(),
+                })
+                .expect("sink is running");
+        }
+
+        /// One consistent cut, requested through the runtime's own path.
+        async fn cut(&self, limits: ReadLimits) -> Result<TailView, RuntimeError> {
+            sink_tail_cut(
+                &self.tx,
+                &self.done,
+                &self.store,
+                &self.log,
+                &self.tail,
+                limits,
+            )
+            .await
+        }
+
+        /// Ask for a cut and drop the reply, as a cancelled caller would.
+        fn send_unwaited_checkpoint(&self, limits: ReadLimits) {
+            let (response, receiver) = oneshot::channel();
+            self.tx
+                .send(OutputMessage::Checkpoint { limits, response })
+                .expect("sink is running");
+            drop(receiver);
+        }
+
+        fn end(&self) {
+            self.tx
+                .send(OutputMessage::End { trailing_gap: 0 })
+                .expect("sink is running");
+        }
+
+        /// Join the sink task (it ends after the output end, once its writer
+        /// is closed).
+        async fn await_end(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.await.expect("sink join").expect("sink result");
+            }
+        }
+
+        fn healthy(&self) -> bool {
+            !self.degraded.load(Ordering::SeqCst)
+        }
+
+        /// How the sink has published its end (or `Running`).
+        fn outcome(&self) -> SinkOutcome {
+            *self.done.borrow()
+        }
+
+        /// Wait until the sink has processed everything handed over so far.
+        /// The handoff counter reaches zero only after the sink has fed the
+        /// bytes to the normalizer *and* drained what they produced, which is
+        /// the synchronization point these tests need.
+        async fn await_processed(&self) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while self.queued.load(Ordering::SeqCst) != 0 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the sink did not drain the handed-over bytes"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    /// The lines one cut reports as committed history, in order.
+    fn cut_lines(cut: &TailView) -> Vec<(u64, String)> {
+        cut.history()
+            .page()
+            .fragments()
+            .iter()
+            .map(|fragment| (fragment.position().line(), fragment.text().to_owned()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn normalized_lines_reach_storage_and_are_queryable() {
+        let root = TempRoot::new("pipeline");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+
+        // Chunks are deliberately split inside control sequences, inside
+        // multi-byte characters, and inside escape payloads.
+        let chunks: Vec<&[u8]> = vec![
+            "你好".as_bytes(),
+            b"\r",
+            b"X",
+            b"\n",
+            "e\u{301}".as_bytes(),
+            "t\u{4e16}a\tb\n".as_bytes(),
+            b"\x1b[1;",
+            b"31m",
+            b"styled\x1b[0m",
+            b"\n\x1b]0;title",
+            b"\x07",
+            b"after-osc\n",
+            b"no newline",
+        ];
+        let outcome = normalize(&store, &log, &chunks).await;
+
+        // The golden normalized history: CR overwrites in place, style and
+        // OSC are discarded, the combining mark stays attached to its base,
+        // the tab is padded to the next stop, and CJK is preserved.
+        let lines = history(&store, &log).await;
+        assert_eq!(
+            lines,
+            vec![
+                (1, "X好".to_owned()),
+                (2, "e\u{301}t\u{4e16}a   b".to_owned()),
+                (3, "styled".to_owned()),
+                (4, "after-osc".to_owned()),
+                (5, "no newline".to_owned()),
+            ]
+        );
+
+        // The mutable tail is empty once the end of output finalized it, and
+        // the last mutable revision resolves onto the line it became.
+        assert!(outcome.tail.lock().unwrap().snapshot().text().is_empty());
+        assert_eq!(
+            outcome
+                .resolved
+                .expect("the finalized tail resolves as history"),
+            pos(5, 0)
+        );
+
+        // A literal grep over the committed history finds the CJK line, with
+        // its bounded context lines.
+        let query = GrepQuery::new(log.clone(), "t世", true, pos(1, 0), 4, 1).expect("query");
+        let page = store
+            .grep(&GrepRequest::fresh(query), GrepLimits::DEFAULT)
+            .await
+            .expect("grep");
+        assert_eq!(page.matches().len(), 1);
+        assert_eq!(page.matches()[0].position().line(), 2);
+        // "e" + combining U+0301 occupy three bytes, so the match starts
+        // there, not at the CJK character.
+        assert_eq!(page.matches()[0].position().byte_offset(), 3);
+        assert_eq!(
+            page.contexts().iter().map(|c| c.line()).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_over_long_mutable_line_is_bounded_and_recorded_as_an_explicit_gap() {
+        let root = TempRoot::new("overlong");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+
+        let long = vec![b'l'; TAIL_MAX_BYTES + 4096];
+        let outcome = normalize(&store, &log, &[&long]).await;
+        assert!(outcome.tail.lock().unwrap().snapshot().text().is_empty());
+        // The snapshot's own position — the first byte the bounded tail
+        // still retained — resolves to the start of the suffix line; an
+        // offset inside the omitted prefix does not (asserted by the
+        // normalizer's own unit tests).
+        assert_eq!(outcome.resolved, Some(pos(2, 0)));
+
+        // Line 1 is an explicit loss: asking for it is a typed refusal that
+        // reports the earliest readable position and the missing range, not
+        // a silently short line.
+        match store
+            .read(
+                &ReadRequest::first(log.clone(), start_at(1), ReadLimits::DEFAULT)
+                    .expect("request"),
+            )
+            .await
+        {
+            Err(StorageError::Query(QueryError::CursorExpired { earliest, missing })) => {
+                assert_eq!(earliest.map(|position| position.line()), Some(2));
+                assert!(missing.is_some(), "the missing range is reported");
+            }
+            other => panic!("expected a typed expiry, got {other:?}"),
+        }
+
+        // The retained suffix is readable as line 2, is bounded, and the
+        // page reports the terminal's explicit loss.
+        let lines = history(&store, &log).await;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, 2);
+        assert!(!lines[0].1.is_empty());
+        assert!(lines[0].1.len() <= TAIL_MAX_BYTES);
+        assert!(lines[0].1.bytes().all(|byte| byte == b'l'));
+        let page = store
+            .read(
+                &ReadRequest::first(log.clone(), start_at(2), ReadLimits::DEFAULT)
+                    .expect("request"),
+            )
+            .await
+            .expect("read");
+        assert!(page.page().degraded());
+    }
+
+    #[tokio::test]
+    async fn the_output_sink_persists_lines_and_finalizes_the_tail_at_the_end() {
+        let root = TempRoot::new("sink");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        // The reader's messages, including a read split inside a multi-byte
+        // character.
+        sink.bytes("你".as_bytes());
+        sink.bytes("好\n".as_bytes());
+        sink.bytes(b"tail");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "你好".to_owned())]);
+        assert_eq!(cut.tail().text(), "tail");
+        assert!(sink.healthy());
+
+        sink.end();
+        sink.await_end().await;
+        assert!(sink.healthy());
+
+        assert_eq!(
+            history(&store, &log).await,
+            vec![(1, "你好".to_owned()), (2, "tail".to_owned())],
+            "the unfinished tail is one history line at the end of output"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_output_sink_records_a_handoff_gap_without_fabricating_lines() {
+        let root = TempRoot::new("sink-gap");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        sink.queued
+            .fetch_add(4096, std::sync::atomic::Ordering::SeqCst);
+        sink.tx
+            .send(OutputMessage::Bytes {
+                gap_before: 4096,
+                bytes: b"after\n".to_vec(),
+            })
+            .expect("sink is running");
+        sink.end();
+        sink.await_end().await;
+
+        // The real bytes are committed under their own numbers; the unknown
+        // loss is the terminal's explicit degraded latch, and the query
+        // surface reports it instead of presenting continuous history.
+        assert_eq!(history(&store, &log).await, vec![(1, "after".to_owned())]);
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "after".to_owned())]);
+        assert!(
+            cut.history().page().degraded(),
+            "the loss is reported, never hidden"
+        );
+        assert!(sink.healthy(), "the normalized stream itself is intact");
+    }
+
+    #[tokio::test]
+    async fn a_discontinuity_commits_the_real_bytes_and_keeps_numbering_monotonic() {
+        let root = TempRoot::new("discontinuity");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut writer = store.open_writer(&log).await.expect("writer");
+        let tail = Arc::new(Mutex::new(TailState::new(
+            log.clone(),
+            TailId::new("discontinuity-tail"),
+            writer.line_watermark() + 1,
+        )));
+        let degraded = Arc::new(AtomicBool::new(false));
+        let mut normalizer = Normalizer::new(Arc::clone(&tail));
+
+        normalizer.feed(b"before");
+        let unaccounted = AtomicBool::new(false);
+        drain_normalized(&mut normalizer, &mut writer, &degraded, &unaccounted).await;
+        // The bounded handoff dropped an unknown run: the real pending bytes
+        // are committed, and no normalized line count is invented for what
+        // was dropped.
+        normalizer.discontinuity();
+        drain_normalized(&mut normalizer, &mut writer, &degraded, &unaccounted).await;
+        normalizer.feed(b"after\n");
+        drain_normalized(&mut normalizer, &mut writer, &degraded, &unaccounted).await;
+        normalizer.finish();
+        drain_normalized(&mut normalizer, &mut writer, &degraded, &unaccounted).await;
+        writer.close().await.expect("close");
+        assert!(!degraded.load(Ordering::SeqCst));
+
+        assert_eq!(
+            history(&store, &log).await,
+            vec![(1, "before".to_owned()), (2, "after".to_owned())],
+            "numbering is monotonic and no line is lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_lines_persist_as_their_own_history_lines() {
+        let root = TempRoot::new("blank-lines");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        sink.bytes(b"\n\ntext\n");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(
+            cut_lines(&cut),
+            vec![
+                (1, String::new()),
+                (2, String::new()),
+                (3, "text".to_owned()),
+            ],
+            "each separator fixes its own history line"
+        );
+        assert!(cut.tail().text().is_empty(), "nothing is pending");
+
+        // A separator with no content still consumes its number, and the
+        // unterminated tail stays mutable.
+        sink.bytes(b"\nmore");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(
+            cut_lines(&cut),
+            vec![
+                (1, String::new()),
+                (2, String::new()),
+                (3, "text".to_owned()),
+                (4, String::new()),
+            ]
+        );
+        assert_eq!(cut.tail().text(), "more");
+        assert!(!cut.tail().truncated());
+
+        // The end of output fixes the mutable tail exactly once and does not
+        // fabricate an extra empty line behind the trailing separator.
+        sink.end();
+        sink.await_end().await;
+        assert_eq!(
+            history(&store, &log).await,
+            vec![
+                (1, String::new()),
+                (2, String::new()),
+                (3, "text".to_owned()),
+                (4, String::new()),
+                (5, "more".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tail_cut_commits_a_buffered_line_and_never_misses_or_duplicates_it() {
+        let root = TempRoot::new("buffered-cut");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        // "first" is finalized (LF) but the writer may still hold it in its
+        // pending batch, while "second" is still the mutable tail. A cut
+        // that sampled the two halves independently would drop "first" out
+        // of both.
+        sink.bytes(b"first\nsecond");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "first".to_owned())]);
+        assert_eq!(cut.tail().text(), "second");
+        assert_eq!(cut.history().cursor().end_line(), 1);
+        assert!(sink.healthy());
+
+        // Later output: the committed line never reappears, and the new line
+        // appears in exactly one half.
+        sink.bytes(b"\nthird");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(
+            cut_lines(&cut),
+            vec![(1, "first".to_owned()), (2, "second".to_owned())]
+        );
+        assert_eq!(cut.tail().text(), "third");
+        assert_eq!(cut.history().cursor().end_line(), 2);
+
+        sink.end();
+        sink.await_end().await;
+        assert_eq!(
+            history(&store, &log).await,
+            vec![
+                (1, "first".to_owned()),
+                (2, "second".to_owned()),
+                (3, "third".to_owned()),
+            ],
+            "every line is persisted exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newline_at_the_cut_lands_in_exactly_one_half() {
+        let root = TempRoot::new("boundary-cut");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        // The separator was queued before the checkpoint: it belongs to the
+        // committed half and the tail is empty.
+        sink.bytes(b"a\n");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "a".to_owned())]);
+        assert!(cut.tail().text().is_empty());
+
+        // A partial line is queued after the checkpoint: it is not part of
+        // this cut at all.
+        sink.bytes(b"b");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "a".to_owned())]);
+        assert_eq!(cut.tail().text(), "b");
+
+        // The separator now lands exactly on a cut boundary.
+        sink.bytes(b"\n");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(
+            cut_lines(&cut),
+            vec![(1, "a".to_owned()), (2, "b".to_owned())]
+        );
+        assert!(cut.tail().text().is_empty());
+        assert_eq!(cut.history().cursor().end_line(), 2);
+
+        sink.end();
+        sink.await_end().await;
+        assert_eq!(
+            history(&store, &log).await,
+            vec![(1, "a".to_owned()), (2, "b".to_owned())],
+            "the boundary line appears exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tail_cut_keeps_its_fixed_range_after_later_output() {
+        let root = TempRoot::new("cut-fixed-range");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let sink = Sink::new(&store, &log).await;
+        let small = ReadLimits::new(2, 32 * 1024).unwrap();
+
+        sink.bytes(b"one\ntwo\nthree\n");
+        let cut = sink.cut(small).await.expect("cut");
+        assert_eq!(
+            cut_lines(&cut),
+            vec![(2, "two".to_owned()), (3, "three".to_owned())],
+            "the newest window fits the line budget"
+        );
+        assert_eq!(cut.history().cursor().end_line(), 3);
+        assert!(cut.tail().text().is_empty());
+
+        // Later output never extends the fixed range of that cursor.
+        sink.bytes(b"four\nfive\nsix\n");
+        let resumed = store
+            .read(&ReadRequest::resume(cut.history().cursor().clone(), small))
+            .await
+            .expect("read");
+        let lines: Vec<u64> = resumed
+            .page()
+            .fragments()
+            .iter()
+            .map(|fragment| fragment.position().line())
+            .collect();
+        assert_eq!(lines, vec![2, 3]);
+
+        // A fresh cut sees the new lines, exactly once each.
+        let cut = sink.cut(small).await.expect("cut");
+        assert_eq!(
+            cut_lines(&cut),
+            vec![(5, "five".to_owned()), (6, "six".to_owned())]
+        );
+        assert!(cut.tail().text().is_empty());
+        assert!(sink.healthy());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_tail_wait_cannot_leave_the_sink_paused() {
+        let root = TempRoot::new("cancelled-cut");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let sink = Sink::new(&store, &log).await;
+
+        // Nobody waits for this checkpoint's reply: the sink must still serve
+        // it and keep draining.
+        sink.send_unwaited_checkpoint(ReadLimits::DEFAULT);
+
+        // A runtime-style request that is cancelled mid-flight must not pause
+        // the sink either.
+        let tx = sink.tx.clone();
+        let done = sink.done.clone();
+        let store_handle = store.clone();
+        let log_handle = log.clone();
+        let tail = Arc::clone(&sink.tail);
+        let cancelled = tokio::spawn(async move {
+            sink_tail_cut(
+                &tx,
+                &done,
+                &store_handle,
+                &log_handle,
+                &tail,
+                ReadLimits::DEFAULT,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        cancelled.abort();
+        let _ = cancelled.await;
+
+        // The next awaited cut is consistent and the sink is still healthy.
+        sink.bytes(b"one\ntwo");
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "one".to_owned())]);
+        assert_eq!(cut.tail().text(), "two");
+        assert!(sink.healthy());
+    }
+
+    #[tokio::test]
+    async fn a_finished_sink_still_serves_a_consistent_cut() {
+        let root = TempRoot::new("finished-cut");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        // The end is queued before the request: the sink closes and flushes
+        // whichever order the two are dequeued in, so the cut must still be
+        // the frozen, fully committed state.
+        sink.bytes(b"x");
+        sink.await_processed().await;
+        let position = sink.tail.lock().unwrap().snapshot().position().clone();
+        sink.bytes(b"\nunfinished");
+        sink.end();
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(
+            cut_lines(&cut),
+            vec![(1, "x".to_owned()), (2, "unfinished".to_owned())],
+            "the end of output fixed the unfinished tail"
+        );
+        assert!(cut.tail().text().is_empty());
+        sink.await_end().await;
+
+        // A verified durable close is what the frozen state needs, and it is
+        // also the proof that publishes the already-buffered lines: "x" was
+        // only accepted (Buffered) until the close drained it.
+        assert_eq!(sink.outcome(), SinkOutcome::Durable);
+        assert_eq!(
+            sink.tail.lock().unwrap().resolve(&position),
+            Some(pos(1, 0)),
+            "the close proves durability for the buffered line"
+        );
+        let fallback = sink.cut(ReadLimits::DEFAULT).await.expect("fallback");
+        assert_eq!(fallback_lines(&fallback), cut_lines(&cut));
+    }
+
+    /// The lines one frozen-state (post-finish) cut reports, in order.
+    fn fallback_lines(cut: &TailView) -> Vec<(u64, String)> {
+        cut_lines(cut)
+    }
+
+    #[tokio::test]
+    async fn a_buffered_mapping_cannot_resolve_until_the_batch_is_durable() {
+        let root = TempRoot::new("buffered-mapping");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let sink = Sink::new(&store, &log).await;
+
+        // "first" is the mutable tail; a reader holds this exact revision.
+        sink.bytes(b"first");
+        sink.await_processed().await;
+        let position = sink.tail.lock().unwrap().snapshot().position().clone();
+
+        // The separator finalizes it. The writer accepts the line but only
+        // *buffers* it (the 64 KiB/50 ms boundary has not been reached), so
+        // the old tail position must not resolve to a history line yet: the
+        // line is not readable.
+        sink.bytes(b"\n");
+        sink.await_processed().await;
+        assert!(
+            sink.tail.lock().unwrap().resolve(&position).is_none(),
+            "a Buffered line must not resolve"
+        );
+
+        // The checkpoint flushes, which is the durability proof.
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "first".to_owned())]);
+        assert_eq!(
+            sink.tail.lock().unwrap().resolve(&position),
+            Some(pos(1, 0)),
+            "a proven line resolves to its stable history line"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_driver_committed_batch_resolves_at_the_next_proof_point() {
+        let root = TempRoot::new("driver-mapping");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        sink.bytes(b"driven");
+        sink.await_processed().await;
+        let position = sink.tail.lock().unwrap().snapshot().position().clone();
+        sink.bytes(b"\n");
+        sink.await_processed().await;
+
+        // The 50 ms deadline driver commits the batch on its own; the sink
+        // never observes that outcome, so publication waits for the next
+        // proof point instead of guessing.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            sink.tail.lock().unwrap().resolve(&position).is_none(),
+            "an unobserved driver commit is not a proof the sink can use"
+        );
+
+        // The checkpoint's flush finds nothing pending and consults the
+        // writer's most recent batch-bearing outcome, which is Committed.
+        let cut = sink.cut(ReadLimits::DEFAULT).await.expect("cut");
+        assert_eq!(cut_lines(&cut), vec![(1, "driven".to_owned())]);
+        assert_eq!(
+            sink.tail.lock().unwrap().resolve(&position),
+            Some(pos(1, 0))
+        );
+
+        sink.end();
+        sink.await_end().await;
+        assert_eq!(sink.outcome(), SinkOutcome::Durable);
+    }
+
+    #[tokio::test]
+    async fn a_size_bound_append_proves_durability_without_a_checkpoint() {
+        let root = TempRoot::new("size-bound-mapping");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        sink.bytes(b"first");
+        sink.await_processed().await;
+        let position = sink.tail.lock().unwrap().snapshot().position().clone();
+        sink.bytes(b"\n");
+        sink.await_processed().await;
+        assert!(sink.tail.lock().unwrap().resolve(&position).is_none());
+
+        // Push the pending batch past the 64 KiB bound: the append that
+        // reaches it flushes synchronously and reports Committed, which is
+        // the durability proof — no checkpoint involved.
+        let line = format!("{}\n", "y".repeat(7000));
+        for _ in 0..20 {
+            sink.bytes(line.as_bytes());
+        }
+        sink.await_processed().await;
+        assert_eq!(
+            sink.tail.lock().unwrap().resolve(&position),
+            Some(pos(1, 0)),
+            "a size-bound commit proves durability"
+        );
+
+        sink.end();
+        sink.await_end().await;
+        assert_eq!(sink.outcome(), SinkOutcome::Durable);
+    }
+
+    #[tokio::test]
+    async fn an_unaccounted_loss_forbids_a_verified_finish() {
+        let root = TempRoot::new("unaccounted-finish");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        let mut sink = Sink::new(&store, &log).await;
+
+        sink.bytes(b"one\n");
+        sink.await_processed().await;
+
+        // Persistence gives up before the next line: the writer refused, so
+        // the sink stops appending. The next accepted line is then neither
+        // committed nor recorded as a dropped gap.
+        sink.degraded.store(true, Ordering::SeqCst);
+        sink.bytes(b"two");
+        sink.await_processed().await;
+        let position = sink.tail.lock().unwrap().snapshot().position().clone();
+        sink.bytes(b"\n");
+        sink.await_processed().await;
+        assert!(
+            sink.tail.lock().unwrap().resolve(&position).is_none(),
+            "a line that was never persisted must not resolve"
+        );
+
+        // A live cut is refused...
+        assert!(matches!(
+            sink.cut(ReadLimits::DEFAULT).await,
+            Err(RuntimeError::Storage { .. })
+        ));
+
+        // ... and so is the frozen fallback after the end: a clean close
+        // cannot vouch for data that was never accounted for.
+        sink.end();
+        sink.await_end().await;
+        assert_eq!(sink.outcome(), SinkOutcome::Unverified);
+        assert!(
+            matches!(
+                sink.cut(ReadLimits::DEFAULT).await,
+                Err(RuntimeError::Storage { .. })
+            ),
+            "a supposedly consistent fallback is never served from an unverified sink"
+        );
+        assert!(sink.unaccounted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn an_unverified_finish_is_refused_instead_of_falling_back() {
+        let root = TempRoot::new("unverified-finish");
+        let store = LogStore::open(&root.0).await.unwrap();
+        let log = identity();
+        {
+            // Create the terminal row and one committed line, so a fallback
+            // *would* return content if it were (wrongly) allowed.
+            let mut writer = store.open_writer(&log).await.expect("writer");
+            writer.append_line(1, "committed").await.expect("append");
+            let outcome = writer.close().await.expect("close");
+            assert_eq!(outcome.normalized, StreamFlushOutcome::Committed);
+        }
+        let tail = Arc::new(Mutex::new(TailState::new(
+            log.clone(),
+            TailId::new("fake-tail"),
+            2,
+        )));
+        // The sink is gone, so the request cannot be answered and the
+        // published finish state decides.
+        let (tx, rx) = mpsc::unbounded_channel::<OutputMessage>();
+        drop(rx);
+
+        for (outcome, allowed) in [
+            (SinkOutcome::Durable, true),
+            (SinkOutcome::Unverified, false),
+            (SinkOutcome::Running, false),
+        ] {
+            let (_sender, done) = watch::channel(outcome);
+            let result = sink_tail_cut(&tx, &done, &store, &log, &tail, ReadLimits::DEFAULT).await;
+            match (allowed, result) {
+                (true, Ok(view)) => {
+                    assert_eq!(cut_lines(&view), vec![(1, "committed".to_owned())]);
+                    assert!(view.tail().text().is_empty());
+                }
+                (false, Err(RuntimeError::Storage { .. })) => {}
+                (_, other) => panic!("outcome {outcome:?} gave {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_finish_guard_marks_every_unverified_end() {
+        // A verified finish is never downgraded.
+        let (sender, receiver) = watch::channel(SinkOutcome::Running);
+        let guard = SinkFinish(sender.clone());
+        sender.send_replace(SinkOutcome::Durable);
+        drop(guard);
+        assert_eq!(*receiver.borrow(), SinkOutcome::Durable);
+
+        // An early return (or any other end that did not publish) is
+        // unverified.
+        let (sender, receiver) = watch::channel(SinkOutcome::Running);
+        drop(SinkFinish(sender));
+        assert_eq!(*receiver.borrow(), SinkOutcome::Unverified);
+
+        // A panicking sink task still publishes through the guard, which is
+        // the case where its writer may never have been closed durably.
+        let (sender, receiver) = watch::channel(SinkOutcome::Running);
+        let handle = tokio::spawn(async move {
+            let _guard = SinkFinish(sender);
+            panic!("sink failure");
+        });
+        assert!(handle.await.is_err(), "the sink task panicked");
+        assert_eq!(*receiver.borrow(), SinkOutcome::Unverified);
     }
 }

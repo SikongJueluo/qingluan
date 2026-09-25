@@ -1827,3 +1827,53 @@ async fn explicit_seal_failure_latches_the_stream_and_keeps_one_active_segment()
         }
     }
 }
+
+/// A recorded normalized loss is a *range* retirement, not a batch: it must
+/// leave the last real batch outcome of the normalized stream observable, so
+/// an owner deciding whether accepted lines are durable never mistakes the
+/// retired range for a dropped batch. The loss itself stays observable
+/// through its return value and the terminal's latches.
+#[tokio::test]
+async fn a_recorded_line_loss_leaves_the_last_batch_outcome_observable() {
+    let root = TempRoot::new("line-loss-outcome");
+    let store = LogStore::open(&root).await.unwrap();
+    let log = log_identity();
+    let mut writer = store.open_writer(&log).await.unwrap();
+
+    // A loss recorded before any batch exists leaves "no batch" standing.
+    let loss = writer.record_line_loss(1, 2).await.unwrap();
+    assert_eq!(loss.first_line, 1);
+    assert_eq!(loss.lines, 2);
+    assert_eq!(writer.line_watermark(), 2);
+    assert_eq!(
+        writer.last_flush_outcome(LogStream::Normalized),
+        StreamFlushOutcome::Nothing,
+        "a loss is not a batch and must not fabricate a dropped outcome"
+    );
+
+    // The batch committed just before the next loss stays the observable
+    // outcome, even though the loss record itself is a drop.
+    writer.append_line(3, "three").await.unwrap();
+    let committed = writer.flush().await.unwrap();
+    assert_eq!(committed.normalized, StreamFlushOutcome::Committed);
+    let loss = writer.record_line_loss(4, 1).await.unwrap();
+    assert_eq!(loss.first_line, 4);
+    assert_eq!(writer.line_watermark(), 4);
+    assert_eq!(
+        writer.last_flush_outcome(LogStream::Normalized),
+        StreamFlushOutcome::Committed,
+        "the last batch outcome survives a recorded loss"
+    );
+
+    // The retired ranges are explicit gaps: the committed line is readable
+    // and the retired numbers are unreadable, never silently skipped.
+    let snapshot = store.recovery_snapshot(&log).await.unwrap();
+    let normalized: Vec<(u64, u64)> = snapshot
+        .gaps
+        .iter()
+        .filter(|gap| gap.stream == LogStream::Normalized)
+        .map(|gap| (gap.start, gap.end))
+        .collect();
+    assert_eq!(normalized, vec![(1, 3), (4, 5)]);
+    assert!(snapshot.degraded, "a recorded loss latches the terminal");
+}

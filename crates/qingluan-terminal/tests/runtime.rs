@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use qingluan_core::terminal::{
-    ControlGeneration, EnvironmentSnapshot, ExitResult, ExternalSessionId, OutputEnd, OutputState,
-    ProcessState, SessionRef, SessionSource, StartSpec, TerminalId, TerminalRef, TerminalSize,
-    WriteAbort,
+    ControlGeneration, EnvironmentSnapshot, ExitResult, ExternalSessionId, GrepLimits, GrepQuery,
+    GrepRequest, HistoryPosition, OutputEnd, OutputState, ProcessState, ReadLimits, ReadRequest,
+    SessionRef, SessionSource, StartSpec, TerminalId, TerminalRef, TerminalSize, WriteAbort,
 };
 use qingluan_terminal::{RuntimeError, SendError, SendRejection, TerminalRuntime};
 
@@ -1734,4 +1734,111 @@ async fn start_racing_shutdown_is_refused_without_registering_or_residue() {
     let temp = h.root.0.clone();
     drop(h);
     assert!(!temp.exists(), "the temp storage root must be gone");
+}
+
+/// Encode bytes as the lowercase hex the `emit` fixture mode decodes, so a
+/// test can drive exact control sequences through a real PTY.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn position(line: u64, byte_offset: u64) -> HistoryPosition {
+    HistoryPosition::new(line, byte_offset).expect("valid position")
+}
+
+#[tokio::test]
+async fn read_tail_and_grep_serve_the_normalized_history() {
+    let Some(h) = Harness::new("s4-query").await else {
+        return;
+    };
+    let session = h.session("s1");
+    // CJK wide characters, a CR overwrite, a combining mark, an ANSI style
+    // sequence, an OSC payload, and a final line with no newline.
+    let stream =
+        "你好\rX\ne\u{301}t\u{4e16}a\x1b[1;31mS\x1b[0m\n\x1b]0;title\x07after-osc\nopen-tail";
+    let terminal = h
+        .start(&session, h.spec(&["emit", &hex(stream.as_bytes())]))
+        .await;
+    h.runtime.await_cleanup(&terminal).await.expect("cleanup");
+
+    let log = h.runtime.log_identity(&terminal).await.expect("identity");
+    let request = ReadRequest::first(log.clone(), None, ReadLimits::DEFAULT).expect("request");
+    let result = h.runtime.read(&request).await.expect("read");
+    let lines: Vec<String> = result
+        .page()
+        .fragments()
+        .iter()
+        .map(|fragment| fragment.text().to_owned())
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            "X好".to_owned(),
+            "e\u{301}t\u{4e16}aS".to_owned(),
+            "after-osc".to_owned(),
+            "open-tail".to_owned(),
+        ]
+    );
+
+    // A literal grep over the committed history binds its query and reports
+    // the context lines it returned.
+    let query = GrepQuery::new(log, "t世", true, position(1, 0), 4, 1).expect("query");
+    let page = h
+        .runtime
+        .grep(&GrepRequest::fresh(query), GrepLimits::DEFAULT)
+        .await
+        .expect("grep");
+    assert_eq!(page.matches().len(), 1);
+    assert_eq!(page.matches()[0].position(), position(2, 3));
+    assert_eq!(
+        page.contexts().iter().map(|c| c.line()).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+
+    // The tail is empty once the end of output fixed it as a history line,
+    // and the history part of the view reports the retained window.
+    let view = h
+        .runtime
+        .tail(&terminal, ReadLimits::DEFAULT)
+        .await
+        .expect("tail");
+    assert!(view.tail().text().is_empty());
+    assert!(view.history().page().retained().is_some());
+    assert!(!view.history().page().degraded());
+
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn tail_snapshot_reports_the_unfinished_line_while_output_is_open() {
+    let Some(h) = Harness::new("s4-tail").await else {
+        return;
+    };
+    let session = h.session("s1");
+    let terminal = h
+        .start(
+            &session,
+            h.spec(&["emit-hold", &hex("partial line".as_bytes())]),
+        )
+        .await;
+
+    // The unfinished line is readable as a mutable tail (no LF was written,
+    // so it is not history yet).
+    let mut text = String::new();
+    for _ in 0..200 {
+        let view = h
+            .runtime
+            .tail(&terminal, ReadLimits::DEFAULT)
+            .await
+            .expect("tail");
+        assert!(view.tail().truncated() == false);
+        text = view.tail().text().to_owned();
+        if !text.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(text, "partial line");
+
+    h.finish().await;
 }

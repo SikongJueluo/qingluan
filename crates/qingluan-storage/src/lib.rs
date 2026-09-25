@@ -88,9 +88,11 @@
 //! `terminal.db` and its sidecars) changes it, and the old epoch's
 //! identity is then rejected while its files are quarantined.
 //!
-//! The fixed-range read / tail / grep query API belongs to S4 and is not
-//! part of this seam; only the committed-prefix verification scan
-//! exists, under `test-hooks`.
+//! The fixed-range read and literal grep query API is [`LogStore::read`],
+//! [`LogStore::grep`], and [`LogStore::log_identity`] (S4): both scan the
+//! committed frames of the normalized stream with bounded allocation and
+//! report retention, gap, and epoch mismatches as typed refusals. The
+//! committed-prefix verification scan stays under `test-hooks`.
 
 mod crash;
 mod db;
@@ -100,8 +102,10 @@ mod gap;
 mod identity;
 mod lease;
 mod paths;
+mod query;
 mod recovery;
 mod runtime;
+mod scan;
 mod writer;
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -117,8 +121,8 @@ pub use gap::GapReason;
 pub use recovery::{RecoveryGap, RecoveryReport};
 pub use runtime::{RuntimePhase, RuntimeRecord, RuntimeRegistry};
 pub use writer::{
-    AppendOutcome, AppendedLine, AppendedLoss, AppendedRaw, FlushOutcomes, LogWriter,
-    StreamFlushOutcome,
+    AppendOutcome, AppendedLine, AppendedLineLoss, AppendedLoss, AppendedRaw, FlushOutcomes,
+    LogWriter, StreamFlushOutcome,
 };
 
 #[cfg(any(test, feature = "test-hooks"))]

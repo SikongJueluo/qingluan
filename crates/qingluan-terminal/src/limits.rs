@@ -38,6 +38,19 @@ pub(crate) const OUTPUT_CLOSE_WAIT: Duration = Duration::from_secs(1);
 /// Bounded PTY read size (one `read(2)` per turn of the reader loop).
 pub(crate) const READ_CHUNK: usize = 8 * 1024;
 
+/// Byte bound of one terminal's mutable normalized tail line. Beyond this
+/// the oldest cells are evicted and the eviction is declared as an explicit
+/// loss (never hidden).
+pub(crate) const TAIL_MAX_BYTES: usize = 64 * 1024;
+
+/// Cell bound of one terminal's mutable normalized tail line (the tighter
+/// of the two bounds for one-column text).
+pub(crate) const TAIL_MAX_CELLS: usize = 8192;
+
+/// Tab stop interval of the line normalizer (columns). A tab never creates
+/// a history line.
+pub(crate) const TAB_WIDTH: usize = 8;
+
 /// Bounded in-flight handoff between the reader and the storage sink: the
 /// reader drops and records a raw gap once this many accepted bytes are
 /// still undrained, so a slow or faulted sink never blocks the PTY.
@@ -119,6 +132,12 @@ mod tests {
         assert_eq!(TERM_GRACE.as_millis(), 600);
         assert_eq!(CGROUP_KILL_WAIT.as_secs(), 3);
         assert_eq!(OUTPUT_CLOSE_WAIT.as_secs(), 1);
+        // The normalizer's memory bounds are explicit constants, so a long
+        // mutable line can never grow without bound.
+        assert_eq!(TAIL_MAX_BYTES, 64 * 1024);
+        assert_eq!(TAIL_MAX_CELLS, 8192);
+        assert_eq!(TAB_WIDTH, 8);
+        assert!(TAIL_MAX_CELLS <= TAIL_MAX_BYTES);
     }
 
     #[test]

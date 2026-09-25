@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use qingluan_core::terminal::QueryError;
 use thiserror::Error;
 
 /// Typed failure of the terminal log storage layer.
@@ -91,6 +92,15 @@ pub enum StorageError {
     /// overlapping two writers' ranges.
     #[error("commit conflict: {detail}")]
     CommitConflict { detail: String },
+
+    /// A query was refused by an invariant rather than by a fault: an
+    /// expired position ([`QueryError::CursorExpired`]), an explicitly
+    /// recorded gap inside the requested range ([`QueryError::Gap`]), or a
+    /// malformed request ([`QueryError::Invalid`]). The domain-level
+    /// reason is carried whole so a caller can tell expiry from a bad
+    /// request, and a refusal is never a silent skip.
+    #[error(transparent)]
+    Query(#[from] QueryError),
 }
 
 pub(crate) fn db_error(error: sqlx::Error) -> StorageError {

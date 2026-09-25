@@ -17,15 +17,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use qingluan_core::terminal::{
-    ControlGeneration, SendReceipt, SessionRef, StartSpec, TerminalId, TerminalRef, TerminalSize,
-    TerminalSnapshot,
+    ControlGeneration, GrepLimits, GrepPage, GrepRequest, HistoryPosition, LogIdentity, ReadLimits,
+    ReadRequest, ReadResult, SendReceipt, SessionRef, StartSpec, TailPosition, TailView,
+    TerminalId, TerminalRef, TerminalSize, TerminalSnapshot,
 };
 use qingluan_storage::{LogStore, RuntimeRecord, RuntimeRegistry};
 use tokio::sync::watch;
 
 use crate::cgroup::DelegatedRoot;
 use crate::config::RuntimeConfig;
-use crate::error::{RuntimeError, SendError, SendRejection};
+use crate::error::{RuntimeError, SendError, SendRejection, storage_error};
 use crate::limits::SHUTDOWN_WAIT;
 use crate::quota::Quota;
 use crate::terminal::{CleanupState, StartRequest, Terminal};
@@ -304,6 +305,85 @@ impl TerminalRuntime {
     ) -> Result<(), RuntimeError> {
         let handle = self.require(terminal)?;
         handle.resize(generation, size).await
+    }
+
+    /// The persisted log identity of one terminal, for minting query
+    /// cursors. The terminal row is the authority, so this works for a
+    /// terminal with no live handle too.
+    pub async fn log_identity(&self, terminal: &TerminalRef) -> Result<LogIdentity, RuntimeError> {
+        self.inner
+            .store
+            .log_identity(terminal)
+            .await
+            .map_err(storage_error)
+    }
+
+    /// Serve one page of a fixed-range read of committed normalized lines.
+    ///
+    /// The first page mints its fixed `end_line` and later output never
+    /// extends it; a page served with a cursor keeps that cursor's bound. A
+    /// position that is no longer readable is
+    /// [`RuntimeError::CursorExpired`] (carrying the earliest readable
+    /// position and the missing range when they are known), a range that
+    /// intersects an explicit gap is [`RuntimeError::QueryGap`], and a
+    /// malformed request is [`RuntimeError::InvalidQuery`] — never a silent
+    /// skip.
+    pub async fn read(&self, request: &ReadRequest) -> Result<ReadResult, RuntimeError> {
+        self.inner.store.read(request).await.map_err(storage_error)
+    }
+
+    /// Serve one page of a literal grep over committed history, with the
+    /// scan budget and the response budget kept separate.
+    pub async fn grep(
+        &self,
+        request: &GrepRequest,
+        limits: GrepLimits,
+    ) -> Result<GrepPage, RuntimeError> {
+        self.inner
+            .store
+            .grep(request, limits)
+            .await
+            .map_err(storage_error)
+    }
+
+    /// One consistent cut of a terminal: the newest committed history
+    /// within the read budget plus its current mutable tail, with every
+    /// line in exactly one of the two.
+    ///
+    /// The cut is taken by the output sink itself, in its own message
+    /// order: everything the reader handed over before the request is
+    /// normalized, the pending storage batch is committed, and the history
+    /// read and the tail sample happen without any later byte in between.
+    /// A line that was finalized but still buffered can therefore never fall
+    /// between the two halves, and a line that is finalized later can never
+    /// appear in both.
+    ///
+    /// Requires a live handle: a terminal known only from a previous run's
+    /// record has no mutable tail, so it is refused rather than reported as
+    /// an empty one.
+    pub async fn tail(
+        &self,
+        terminal: &TerminalRef,
+        limits: ReadLimits,
+    ) -> Result<TailView, RuntimeError> {
+        let handle = self.require(terminal)?;
+        handle.tail_view(&self.inner.store, limits).await
+    }
+
+    /// Resolve an old tail position onto the stable history line it became
+    /// (the mapping is retained until the related history is cleaned). An
+    /// overwritten revision, an unknown tail, a revision whose line
+    /// durability is not proven yet (the writer accepted the line but has
+    /// not committed it, or its batch failed), or an offset inside the
+    /// prefix a bounded tail had to omit is [`RuntimeError::CursorExpired`] —
+    /// never a silent join onto newer content, and never a position that is
+    /// not actually readable.
+    pub fn resolve_tail_position(
+        &self,
+        terminal: &TerminalRef,
+        position: &TailPosition,
+    ) -> Result<HistoryPosition, RuntimeError> {
+        self.require(terminal)?.resolve_tail(position)
     }
 
     /// Commit a stop and return the current snapshot immediately. The
@@ -609,12 +689,6 @@ fn record_snapshot(record: RuntimeRecord) -> TerminalSnapshot {
         stopping: record.stopping,
         size: record.size,
         retained_history: None,
-    }
-}
-
-fn storage_error(error: qingluan_storage::StorageError) -> RuntimeError {
-    RuntimeError::Storage {
-        detail: error.to_string(),
     }
 }
 

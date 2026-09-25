@@ -11,7 +11,7 @@
 //! identity can never leave partial state behind. `SessionSource` and
 //! `ExternalSessionId` stay opaque text keys with no format constraint.
 
-use qingluan_core::terminal::LogIdentity;
+use qingluan_core::terminal::{LogIdentity, TerminalRef};
 use uuid::Uuid;
 
 use crate::error::StorageError;
@@ -22,6 +22,18 @@ pub(crate) struct LogKey {
     pub session_source: String,
     pub external_session_id: String,
     pub terminal_id: String,
+}
+
+impl LogKey {
+    /// The key of one terminal, with no epoch: every query resolves the
+    /// persisted epoch itself, so a caller only has to name the terminal.
+    pub(crate) fn of(terminal: &TerminalRef) -> Self {
+        Self {
+            session_source: terminal.session.source.as_str().to_owned(),
+            external_session_id: terminal.session.external_id.as_str().to_owned(),
+            terminal_id: terminal.terminal_id.as_str().to_owned(),
+        }
+    }
 }
 
 /// 16-byte identities carried by every segment header of one log.
