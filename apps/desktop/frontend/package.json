@@ -27,6 +27,10 @@
     "fallow:health": "fallow health --score --hotspots --targets --format json"
   },
   "dependencies": {
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/merge": "^6.12.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
     "@formkit/drag-and-drop": "^0.6.1",
     "@lucide/vue": "^1.22.0",
     "@tailwindcss/vite": "^4.2.4",
@@ -35,6 +39,7 @@
     "@vueuse/core": "^14.3.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "codemirror": "^6.0.2",
     "dompurify": "^3.4.11",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.4",
