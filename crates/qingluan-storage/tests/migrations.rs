@@ -109,7 +109,7 @@ async fn table_columns(root: &TempRoot, table: &str) -> Vec<String> {
 async fn initial_migration_carries_both_streams_and_no_s4_tail() {
     let root = TempRoot::new("initial-schema");
     LogStore::open(&root).await.unwrap();
-    assert_eq!(applied_versions(&root).await, vec![1, 2, 3]);
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3, 4]);
 
     // Per-stream active pointers and watermarks on the terminal row.
     let terminal = table_columns(&root, "terminal").await;
@@ -191,12 +191,12 @@ async fn failing_migration_rolls_back_with_no_half_ddl_and_no_version() {
     LogStore::open_with_migration_dir(&root, &dir)
         .await
         .unwrap();
-    assert_eq!(applied_versions(&root).await, vec![1, 2, 3]);
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3, 4]);
 
-    // A 0004 whose first statement succeeds and whose second fails: the
+    // A 0005 whose first statement succeeds and whose second fails: the
     // per-migration transaction must roll the whole file back.
     let bad = "CREATE TABLE migration_probe_a (x INTEGER);\nCREATE TABLE migration_probe_b (;";
-    let dir = migration_dir(&root, &[("0004_bad.sql", bad)]);
+    let dir = migration_dir(&root, &[("0005_bad.sql", bad)]);
     match LogStore::open_with_migration_dir(&root, &dir).await {
         Err(StorageError::Migration(_)) => {}
         other => panic!(
@@ -210,17 +210,17 @@ async fn failing_migration_rolls_back_with_no_half_ddl_and_no_version() {
     );
     assert_eq!(
         applied_versions(&root).await,
-        vec![1, 2, 3],
+        vec![1, 2, 3, 4],
         "failed version must not be recorded"
     );
 
-    // The same DB upgrades cleanly once 0004 is fixed.
+    // The same DB upgrades cleanly once 0005 is fixed.
     let good = "CREATE TABLE migration_probe_ok (x INTEGER);";
-    let dir = migration_dir(&root, &[("0004_bad.sql", good)]);
+    let dir = migration_dir(&root, &[("0005_bad.sql", good)]);
     LogStore::open_with_migration_dir(&root, &dir)
         .await
         .unwrap();
-    assert_eq!(applied_versions(&root).await, vec![1, 2, 3, 4]);
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3, 4, 5]);
     assert!(table_exists(&root, "migration_probe_ok").await);
 }
 
@@ -239,7 +239,7 @@ async fn unsupported_persisted_format_version_fails_loudly_at_open() {
     match LogStore::open(&root).await {
         Err(StorageError::FormatVersionUnsupported { found, supported }) => {
             assert_eq!(found, "99");
-            assert_eq!(supported, "3");
+            assert_eq!(supported, "4");
         }
         other => panic!(
             "expected FormatVersionUnsupported, got {:?}",
@@ -252,7 +252,7 @@ async fn unsupported_persisted_format_version_fails_loudly_at_open() {
 async fn runtime_registry_migration_has_no_pid_cgroup_env_or_events() {
     let root = TempRoot::new("runtime-schema");
     LogStore::open(&root).await.unwrap();
-    assert_eq!(applied_versions(&root).await, vec![1, 2, 3]);
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3, 4]);
 
     let columns = table_columns(&root, "terminal_runtime").await;
     for required in [
@@ -380,6 +380,154 @@ async fn runtime_registry_migration_has_no_pid_cgroup_env_or_events() {
                  (session_source, external_session_id, terminal_id, phase, process_state,
                   output_state, stopping, size_rows, size_columns, revision, created_ms, updated_ms)
              VALUES ('s', 'e', 'z', 'starting', 'running', 'open', 0, 0, 120, 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn session_event_migration_is_composite_and_keeps_events_self_explanatory() {
+    let root = TempRoot::new("session-events-schema");
+    LogStore::open(&root).await.unwrap();
+    assert_eq!(applied_versions(&root).await, vec![1, 2, 3, 4]);
+
+    // Composite session key plus the terminal id and typed payload columns,
+    // so an event row remains interpretable after its terminal record is
+    // deleted (no foreign key, no cascade).
+    let event = table_columns(&root, "session_event").await;
+    for required in [
+        "session_source",
+        "external_session_id",
+        "terminal_id",
+        "event_seq",
+        "kind",
+        "exit_kind",
+        "exit_value",
+        "output_end",
+        "created_ms",
+    ] {
+        assert!(
+            event.contains(&required.to_owned()),
+            "session_event must carry {required}"
+        );
+    }
+    // No output body or environment is retained with an event.
+    for forbidden in ["output", "text", "payload", "env", "environment", "input"] {
+        assert!(
+            !event.contains(&forbidden.to_owned()),
+            "session_event must not carry {forbidden}"
+        );
+    }
+
+    let state = table_columns(&root, "session_state").await;
+    for required in [
+        "session_source",
+        "external_session_id",
+        "pruned_through_seq",
+        "acked_through_seq",
+        "last_committed_seq",
+    ] {
+        assert!(
+            state.contains(&required.to_owned()),
+            "session_state must carry {required}"
+        );
+    }
+    // The probe spelling is deliberately not used: the domain names the
+    // committed bound `last_committed_seq`.
+    assert!(!state.contains(&"last_appended_seq".to_owned()));
+
+    // A foreign key to the terminal runtime would let a terminal delete
+    // cascade into the event stream, which protocol forbids.
+    let pool = raw_pool(&root).await;
+    let fks: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('session_event')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        fks.is_empty(),
+        "session_event must not reference another table: {fks:?}"
+    );
+
+    // The watermark ordering and the pending-payload shape are enforced by
+    // CHECK constraints.
+    sqlx::query(
+        "INSERT INTO session_state
+             (session_source, external_session_id, pruned_through_seq,
+              acked_through_seq, last_committed_seq)
+         VALUES ('s', 'e', 2, 5, 9)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // pruned > acked.
+    assert!(
+        sqlx::query(
+            "INSERT INTO session_state
+                 (session_source, external_session_id, pruned_through_seq,
+                  acked_through_seq, last_committed_seq)
+             VALUES ('s', 'e2', 6, 5, 9)",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    // acked > committed.
+    assert!(
+        sqlx::query(
+            "INSERT INTO session_state
+                 (session_source, external_session_id, pruned_through_seq,
+                  acked_through_seq, last_committed_seq)
+             VALUES ('s', 'e3', 3, 5, 4)",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+
+    // A valid exit event row, then shape violations: a zero sequence, an
+    // `exited` row with no payload, and an `output_closed` row with no end.
+    sqlx::query(
+        "INSERT INTO session_event
+             (session_source, external_session_id, terminal_id, event_seq, kind,
+              exit_kind, exit_value, output_end, created_ms)
+         VALUES ('s', 'e', 't', 1, 'exited', 'code', 0, NULL, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO session_event
+                 (session_source, external_session_id, terminal_id, event_seq, kind,
+                  exit_kind, exit_value, output_end, created_ms)
+             VALUES ('s', 'e', 't', 0, 'exited', 'code', 0, NULL, 0)",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT INTO session_event
+                 (session_source, external_session_id, terminal_id, event_seq, kind,
+                  exit_kind, exit_value, output_end, created_ms)
+             VALUES ('s', 'e', 't', 2, 'exited', NULL, NULL, NULL, 0)",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT INTO session_event
+                 (session_source, external_session_id, terminal_id, event_seq, kind,
+                  exit_kind, exit_value, output_end, created_ms)
+             VALUES ('s', 'e', 't', 3, 'output_closed', NULL, NULL, NULL, 0)",
         )
         .execute(&pool)
         .await

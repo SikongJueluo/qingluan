@@ -34,7 +34,7 @@ use crate::identity::{HeaderIdentity, LogKey};
 use crate::paths;
 
 /// Persisted on-disk format version this build reads and writes.
-pub(crate) const FORMAT_VERSION: &str = "3";
+pub(crate) const FORMAT_VERSION: &str = "4";
 
 /// One terminal row. The two stream pointers, watermarks, and retained
 /// floors are independent: `active_normalized_segment`/`line_watermark`/
@@ -200,6 +200,13 @@ fn embedded_migrator() -> Migrator {
             "terminal_runtime".into(),
             MigrationType::Simple,
             include_str!("../migrations/0003_terminal_runtime.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            4,
+            "session_events".into(),
+            MigrationType::Simple,
+            include_str!("../migrations/0004_session_events.sql").into_sql_str(),
             false,
         ),
     ])

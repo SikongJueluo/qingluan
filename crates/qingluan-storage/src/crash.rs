@@ -40,6 +40,20 @@ pub enum CrashPoint {
     TxnBeforeCommit,
     /// Transaction committed.
     TxnAfterCommit,
+    /// Session lifecycle: the `session_event` row and the
+    /// `session_state.last_committed_seq` bump are inserted, the
+    /// containing transaction has not committed.
+    EventInsert,
+    /// Session lifecycle: inside the transaction, right before commit
+    /// (terminal state change and event together).
+    EventBeforeCommit,
+    /// Session lifecycle: the transaction committed; the record/event have
+    /// not been returned to the caller.
+    EventCommit,
+    /// Session lifecycle: the committed event is published to the caller
+    /// (returned from the transition method). Observable only after
+    /// [`CrashPoint::EventCommit`].
+    EventPublish,
     /// Commit returned; in-memory state not yet published.
     PublishBefore,
     /// In-memory state published.

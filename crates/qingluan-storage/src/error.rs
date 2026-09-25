@@ -46,6 +46,37 @@ pub enum StorageError {
     #[error("runtime registry conflict: {detail}")]
     RuntimeConflict { detail: String },
 
+    /// A cumulative event ack named a sequence beyond the session's durable
+    /// `last_committed_seq`: an uncommitted bound may never be acknowledged.
+    /// Nothing is written; the offending bound and the committed bound it
+    /// exceeded are carried whole.
+    #[error("event ack {acked} exceeds committed event bound {committed}")]
+    EventAckOutOfBounds { acked: u64, committed: u64 },
+
+    /// An explicit prune named a sequence beyond the session's durable
+    /// `acked_through_seq`: only an acknowledged contiguous prefix may be
+    /// cleared. Nothing is deleted; the offending bound and the acked bound
+    /// it exceeded are carried whole.
+    #[error("event prune through {through} exceeds acked event bound {acked}")]
+    EventPruneOutOfBounds { through: u64, acked: u64 },
+
+    /// A replay/subscribe request started strictly before the session's
+    /// `pruned_through_seq`, so the requested range is no longer retained.
+    /// The cleared prefix and the earliest recoverable resumption point are
+    /// carried instead of silently jumping to the newest event.
+    #[error(
+        "event range cleared: after_event_seq {after} precedes pruned bound \
+         {pruned_through_seq}; resume after {available_after_seq}"
+    )]
+    EventRangeCleared {
+        /// The requested exclusive lower bound.
+        after: u64,
+        /// Highest already-pruned sequence for this session.
+        pruned_through_seq: u64,
+        /// Earliest safe resumption bound (== `pruned_through_seq`).
+        available_after_seq: u64,
+    },
+
     /// `append_line` must continue at exactly `watermark + 1`; line numbers
     /// are never reused or skipped by the writer (gaps are explicit).
     #[error("line {attempted} does not continue at watermark {watermark} + 1")]

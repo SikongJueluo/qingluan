@@ -34,3 +34,9 @@ tokio = { workspace = true, features = ["test-util"] }
 [[test]]
 name = "crash_matrix"
 harness = false
+
+# Real abrupt-crash matrix for the S5 session-event commit sequence; same
+# argv-dispatch crash-child pattern.
+[[test]]
+name = "session_event_crash"
+harness = false

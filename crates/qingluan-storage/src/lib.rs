@@ -119,7 +119,9 @@ use qingluan_core::terminal::LogIdentity;
 pub use error::StorageError;
 pub use gap::GapReason;
 pub use recovery::{RecoveryGap, RecoveryReport};
-pub use runtime::{RuntimePhase, RuntimeRecord, RuntimeRegistry};
+pub use runtime::{
+    EventReplay, LifecycleCommit, MAX_EVENT_PAGE, RuntimePhase, RuntimeRecord, RuntimeRegistry,
+};
 pub use writer::{
     AppendOutcome, AppendedLine, AppendedLineLoss, AppendedLoss, AppendedRaw, FlushOutcomes,
     LogWriter, StreamFlushOutcome,
