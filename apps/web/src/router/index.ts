@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import ApprovalsView from '@/views/ApprovalsView.vue'
 import HomeView from '@/views/HomeView.vue'
 import MarkdownReviewDemoView from '@/views/MarkdownReviewDemoView.vue'
 
@@ -9,6 +10,11 @@ const router = createRouter({
       path: '/',
       name: 'home',
       component: HomeView,
+    },
+    {
+      path: '/approvals',
+      name: 'approvals',
+      component: ApprovalsView,
     },
     {
       path: '/markdown-review',

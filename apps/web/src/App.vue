@@ -33,6 +33,14 @@
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton as-child>
+                  <router-link to="/approvals">
+                    <Inbox />
+                    <span>审批</span>
+                  </router-link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton as-child>
                   <router-link to="/markdown-review">
                     <FileText />
                     <span>Markdown Review</span>
@@ -86,7 +94,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from '@/components/ui/sidebar'
-import { FileText, Home, Bird, Kanban } from 'lucide-vue-next'
+import { FileText, Home, Bird, Kanban, Inbox } from 'lucide-vue-next'
 </script>
 
 <style scoped></style>
