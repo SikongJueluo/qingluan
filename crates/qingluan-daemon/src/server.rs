@@ -55,10 +55,14 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send) -> D
         .max_encoding_message_size(config.terminal.max_message_bytes);
 
     tracing::info!(address = %http_addr, "HTTP daemon listening");
-    if matches!(config.daemon.host.as_str(), "0.0.0.0" | "::" | "")
-        && let Some(ip) = primary_lan_ip()
-    {
-        tracing::info!(address = %format!("http://{ip}:{}", config.daemon.port), "HTTP daemon reachable on the local network");
+    if matches!(config.daemon.host.as_str(), "0.0.0.0" | "::" | "") {
+        for (name, ip) in lan_addresses() {
+            tracing::info!(
+                interface = %name,
+                address = %format!("http://{ip}:{}", config.daemon.port),
+                "HTTP daemon reachable on the local network"
+            );
+        }
     }
     tracing::info!(
         socket = %config.terminal.socket_path.display(),
@@ -151,12 +155,29 @@ fn flatten_join(result: Result<Result<(), String>, tokio::task::JoinError>) -> R
     }
 }
 
-/// The host's primary outbound IPv4 address, found from the routing table
-/// without sending traffic.
-fn primary_lan_ip() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("10.255.255.255:1").ok()?;
-    Some(socket.local_addr().ok()?.ip())
+/// Global IPv4 addresses of every non-loopback interface, so the startup
+/// log covers every network the host is reachable on (physical LAN,
+/// Tailscale, VPNs, bridges) instead of only the default-route one.
+fn lan_addresses() -> Vec<(String, std::net::Ipv4Addr)> {
+    let mut addrs: Vec<_> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|iface| !iface.is_loopback())
+        .filter_map(|iface| {
+            let if_addrs::IfAddr::V4(v4) = iface.addr else {
+                return None;
+            };
+            // Skip 169.254.* autoconfiguration addresses; they are not
+            // usable as client targets.
+            if v4.ip.is_link_local() {
+                return None;
+            }
+            Some((iface.name, v4.ip))
+        })
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
 }
 
 fn validate_config(config: &Config) -> DaemonResult<()> {
