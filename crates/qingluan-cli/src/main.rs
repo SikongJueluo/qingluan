@@ -12,6 +12,7 @@ use qingluan_core::workspace::{
 };
 use qingluan_protocol::{ApiResponse, HealthResponse};
 use reqwest::Client;
+use serde::Deserialize;
 
 /// Qingluan CLI — stable agent entry point for the Qingluan task platform.
 ///
@@ -38,6 +39,41 @@ enum Commands {
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
+    },
+
+    /// Start a code review session; the daemon does the actual work
+    /// (diff, web UI) — this is a thin entry that prints the URL.
+    Review {
+        #[command(subcommand)]
+        action: Option<ReviewAction>,
+
+        /// Directory to review (any path inside a jj repository).
+        dir: Option<PathBuf>,
+
+        /// Base revision (jj revset; default `main`).
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Target revision (jj revset; default `@`).
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Open the review URL in the system browser.
+        #[arg(long)]
+        open: bool,
+
+        /// Machine-readable JSON on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ReviewAction {
+    /// Export a review session's comments as markdown (agent handoff).
+    Export {
+        /// Review session id.
+        id: String,
     },
 }
 
@@ -110,6 +146,38 @@ async fn main() {
             // working when the config file is broken (only the open-flow
             // `✚ new workspace` entry needs it, same as `workspace add`).
             cmd_workspace(action);
+        }
+        Commands::Review {
+            action,
+            dir,
+            from,
+            to,
+            open,
+            json,
+        } => {
+            let daemon_url = resolve_daemon_url(cli.daemon_url.as_deref());
+            match action {
+                Some(ReviewAction::Export { id }) => {
+                    cmd_review_export(&daemon_url, &id).await;
+                }
+                None => {
+                    let Some(dir) = dir else {
+                        machine_error(
+                            "missing_directory",
+                            "pass the directory to review: qingluan review <dir>",
+                        );
+                    };
+                    cmd_review(
+                        &daemon_url,
+                        &dir,
+                        from.as_deref(),
+                        to.as_deref(),
+                        open,
+                        json,
+                    )
+                    .await;
+                }
+            }
         }
     }
 }
@@ -807,6 +875,151 @@ fn launch_pi(root: &str, args: &[&str]) -> ! {
     }
 }
 
+/// `POST /reviews` response body.
+#[derive(Debug, Deserialize)]
+struct CreateReviewResponse {
+    id: String,
+}
+
+/// Wire shape of a review comment (daemon `ReviewComment`, camelCase).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentDto {
+    file: String,
+    side: String,
+    line_from: u32,
+    line_to: u32,
+    author: String,
+    content: String,
+}
+
+/// `qingluan review <dir>`: create a session, print its URL.
+async fn cmd_review(
+    daemon_url: &str,
+    dir: &Path,
+    from: Option<&str>,
+    to: Option<&str>,
+    open: bool,
+    json: bool,
+) {
+    // Absolute path: the daemon may run from anywhere; also lexical (no
+    // symlink resolution) like the workspace tooling.
+    let abs = qingluan_core::workspace::lexical_absolute(dir);
+    let client = Client::new();
+    let response = client
+        .post(format!("{daemon_url}/reviews"))
+        .json(&serde_json::json!({ "path": abs, "from": from, "to": to }))
+        .send()
+        .await;
+
+    let body = match response {
+        Ok(resp) => match resp.json::<ApiResponse<CreateReviewResponse>>().await {
+            Ok(body) if body.ok => body,
+            Ok(body) => {
+                let error = body
+                    .error
+                    .as_ref()
+                    .map(|e| format!("{}: {}", e.code, e.message))
+                    .unwrap_or_else(|| "unknown error".into());
+                machine_error("review_create_failed", error);
+            }
+            Err(e) => machine_error(
+                "parse_error",
+                format!("failed to parse review response: {e}"),
+            ),
+        },
+        Err(e) => machine_error(
+            "daemon_unreachable",
+            format!("Daemon is not running at {daemon_url} ({e}). Start it with: qingluan-daemon"),
+        ),
+    };
+    let id = body.data.expect("ok response carries data").id;
+    let from = from.unwrap_or("main");
+    let to = to.unwrap_or("@");
+    let url = format!("{daemon_url}/review/{id}?from={from}&to={to}");
+
+    if open && let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
+        machine_error(
+            "open_failed",
+            format!("cannot open browser via xdg-open: {e}"),
+        );
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "ok": true, "id": id, "url": url })
+        );
+    } else {
+        // First line is the bare URL (agent-friendly); human text follows.
+        println!("{url}");
+        println!(
+            "review session {id} ({from}..{to}) — comment in the browser, then `qingluan review export {id}`"
+        );
+    }
+}
+
+/// `qingluan review export <id>`: print comments as markdown handoff.
+async fn cmd_review_export(daemon_url: &str, id: &str) {
+    let client = Client::new();
+    let response = client
+        .get(format!("{daemon_url}/reviews/{id}/comments"))
+        .send()
+        .await;
+    let comments = match response {
+        Ok(resp) => match resp.json::<ApiResponse<Vec<ReviewCommentDto>>>().await {
+            Ok(body) if body.ok => body.data.unwrap_or_default(),
+            Ok(body) => {
+                let error = body
+                    .error
+                    .as_ref()
+                    .map(|e| format!("{}: {}", e.code, e.message))
+                    .unwrap_or_else(|| "unknown error".into());
+                machine_error("review_export_failed", error);
+            }
+            Err(e) => machine_error("parse_error", format!("failed to parse comments: {e}")),
+        },
+        Err(e) => machine_error(
+            "daemon_unreachable",
+            format!("Daemon is not running at {daemon_url} ({e}). Start it with: qingluan-daemon"),
+        ),
+    };
+    print!("{}", comments_markdown(&comments));
+}
+
+/// Render comments as the markdown agent-handoff document.
+///
+/// Format (mirrored by the web UI's 复制为 Markdown):
+/// `# Review comments` / `## <path>` / `- [<side> L<from>-L<to>] <author>: <content>`
+/// with multiline content indented two spaces.
+fn comments_markdown(comments: &[ReviewCommentDto]) -> String {
+    let mut sorted: Vec<&ReviewCommentDto> = comments.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.line_from.cmp(&b.line_from))
+            .then(a.line_to.cmp(&b.line_to))
+    });
+
+    let mut out = String::from("# Review comments\n\n");
+    let mut current_file: Option<&str> = None;
+    for comment in sorted {
+        if current_file != Some(comment.file.as_str()) {
+            if current_file.is_some() {
+                out.push('\n');
+            }
+            out.push_str(&format!("## {}\n\n", comment.file));
+            current_file = Some(comment.file.as_str());
+        }
+        let content = comment.content.replace('\n', "\n  ");
+        out.push_str(&format!(
+            "- [{} L{}-L{}] {}: {}\n",
+            comment.side, comment.line_from, comment.line_to, comment.author, content
+        ));
+    }
+    out
+}
+
 async fn cmd_health(daemon_url: &str) {
     let client = Client::new();
     match client.get(format!("{}/health", daemon_url)).send().await {
@@ -833,6 +1046,46 @@ async fn cmd_health(daemon_url: &str) {
 mod tests {
     use super::*;
     use qingluan_core::workspace::{SessionSummary, WorkspaceSummary};
+
+    fn comment(file: &str, side: &str, from: u32, to: u32, content: &str) -> ReviewCommentDto {
+        ReviewCommentDto {
+            file: file.into(),
+            side: side.into(),
+            line_from: from,
+            line_to: to,
+            author: "你".into(),
+            content: content.into(),
+        }
+    }
+
+    #[test]
+    fn markdown_export_groups_by_file_and_sorts_by_line() {
+        let md = comments_markdown(&[
+            comment("src/b.rs", "new", 5, 5, "second"),
+            comment("src/a.rs", "new", 10, 12, "later in file"),
+            comment("src/a.rs", "old", 1, 3, "first"),
+        ]);
+        assert_eq!(
+            md,
+            "# Review comments\n\n\
+             ## src/a.rs\n\n\
+             - [old L1-L3] 你: first\n\
+             - [new L10-L12] 你: later in file\n\
+             \n## src/b.rs\n\n\
+             - [new L5-L5] 你: second\n"
+        );
+    }
+
+    #[test]
+    fn markdown_export_indents_multiline_content() {
+        let md = comments_markdown(&[comment("src/a.rs", "new", 1, 1, "line one\nline two")]);
+        assert!(md.contains("- [new L1-L1] 你: line one\n  line two\n"));
+    }
+
+    #[test]
+    fn markdown_export_empty_is_header_only() {
+        assert_eq!(comments_markdown(&[]), "# Review comments\n\n");
+    }
 
     fn session(title: &str, message_count: u32, modified: &str) -> SessionSummary {
         SessionSummary {

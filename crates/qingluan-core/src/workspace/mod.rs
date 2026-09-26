@@ -10,7 +10,7 @@ mod jj;
 mod pi_sessions;
 mod time;
 
-pub use associate::association_key;
+pub use associate::{association_key, lexical_absolute};
 pub use catalog::{
     RegisteredWorkspace, SessionSummary, WorkspaceCatalog, WorkspaceSummary, build_catalog,
 };

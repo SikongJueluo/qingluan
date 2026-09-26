@@ -13,9 +13,20 @@
           <span class="text-green-600">+{{ totalAdditions }}</span>
           <span class="text-red-600">−{{ totalDeletions }}</span> · {{ store.count }} 条评论
         </span>
-        <span class="ml-auto font-mono text-xs text-muted-foreground">
+        <span class="ml-auto flex items-center gap-2 font-mono text-xs text-muted-foreground">
           {{ sessionId.slice(0, 8) }} · {{ fromRev }}..{{ toRev }}
         </span>
+        <Button
+          size="sm"
+          variant="outline"
+          :disabled="!store.count"
+          title="复制为 Markdown：与 qingluan review export 同格式"
+          @click="copyMarkdown"
+        >
+          <ClipboardCheck v-if="copied" class="size-4" />
+          <Clipboard v-else class="size-4" />
+          {{ copied ? '已复制' : '复制为 Markdown' }}
+        </Button>
       </div>
       <p v-if="!files.length" class="text-sm text-muted-foreground">此范围内没有变更。</p>
       <CodeReviewDiff
@@ -32,10 +43,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { GitPullRequest } from 'lucide-vue-next'
+import { Clipboard, ClipboardCheck, GitPullRequest } from 'lucide-vue-next'
 import CodeReviewDiff from '@/components/code-review/CodeReviewDiff.vue'
 import type { ChangedFileMeta } from '@/components/code-review/types'
 import { reviewApi } from '@/lib/review-api'
+import { commentsMarkdown } from '@/lib/review-export'
 import { useReviewCommentsStore } from '@/stores/reviewComments'
 
 const route = useRoute()
@@ -53,6 +65,23 @@ const error = ref<string | null>(null)
 
 const totalAdditions = computed(() => files.value.reduce((sum, f) => sum + f.additions, 0))
 const totalDeletions = computed(() => files.value.reduce((sum, f) => sum + f.deletions, 0))
+
+const copied = ref(false)
+let copiedTimer: ReturnType<typeof setTimeout> | undefined
+
+async function copyMarkdown() {
+  try {
+    await navigator.clipboard.writeText(commentsMarkdown(store.comments))
+    copied.value = true
+    clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => {
+      copied.value = false
+    }, 1500)
+  } catch {
+    // Clipboard API unavailable (e.g. insecure context); ignore — the
+    // same document is available via `qingluan review export`.
+  }
+}
 
 onMounted(async () => {
   if (!sessionId.value) {
