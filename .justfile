@@ -2,13 +2,13 @@
 
 # Frontend
 frontend-dev:
-    cd apps/desktop/frontend && bun dev
+    cd apps/web && bun dev
 
 frontend-build:
-    cd apps/desktop/frontend && bun run build
+    cd apps/web && bun run build
 
 frontend-test:
-    cd apps/desktop/frontend && bun run test:unit:run
+    cd apps/web && bun run test:unit:run
 
 # Rust
 daemon-dev:
@@ -30,7 +30,7 @@ check:
 
 # Tauri
 tauri-dev:
-    cd apps/desktop/frontend && bun tauri dev
+    cd apps/desktop && bun tauri dev
 
 # ── Quality Gate ──
 
@@ -40,7 +40,7 @@ quality: quality-rust quality-fe
 # Build the frontend bundle so `tauri::generate_context!` (which requires
 # frontendDist to exist) compiles during clippy/test of qingluan-desktop.
 frontend-dist:
-    cd apps/desktop/frontend && bun run build-only
+    cd apps/web && bun run build-only
 
 # Rust quality checks (read-only, no file modification)
 quality-rust: frontend-dist
@@ -50,19 +50,19 @@ quality-rust: frontend-dist
 
 # Frontend quality checks (read-only, no file modification)
 quality-fe:
-    cd apps/desktop/frontend && bun run quality
+    cd apps/web && bun run quality
 
 # Soft reports (informational, don't block)
 quality-soft:
-    cd apps/desktop/frontend && bun run quality:soft
+    cd apps/web && bun run quality:soft
 
 # ── Dev-time fix commands (modify files — NOT for CI/Harness) ──
 
 # Auto-fix all (Rust + frontend)
 fix:
     cargo fmt --all
-    cd apps/desktop/frontend && bun run lint
-    cd apps/desktop/frontend && bun run format
+    cd apps/web && bun run lint
+    cd apps/web && bun run format
 
 # Auto-fix Rust only
 fix-rust:
@@ -71,8 +71,8 @@ fix-rust:
 
 # Auto-fix frontend only
 fix-fe:
-    cd apps/desktop/frontend && bun run lint
-    cd apps/desktop/frontend && bun run format
+    cd apps/web && bun run lint
+    cd apps/web && bun run format
 
 # ── Audit (soft report) ──
 
@@ -82,10 +82,10 @@ audit:
 
 # Coverage report
 coverage:
-    cd apps/desktop/frontend && bun run test:coverage
+    cd apps/web && bun run test:coverage
 
 # Full validation (backward compat)
 test-all:
     cargo check --workspace
-    cd apps/desktop/frontend && bun run type-check
-    cd apps/desktop/frontend && bun run test:unit
+    cd apps/web && bun run type-check
+    cd apps/web && bun run test:unit

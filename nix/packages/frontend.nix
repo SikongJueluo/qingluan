@@ -16,13 +16,13 @@ stdenv.mkDerivation (finalAttrs: {
   pname = "qingluan-frontend";
   version = "0.1.0";
 
-  src = "${root}/apps/desktop/frontend";
+  src = "${root}/apps/web";
 
   pnpmDeps = fetchPnpmDeps {
     inherit (finalAttrs) pname src;
     inherit pnpm;
     fetcherVersion = 3; # pnpm 10 store (v10); see nixpkgs manual #javascript-pnpm-fetcherVersion
-    hash = "sha256-pkFY2E03j0YN/3KQELW4++GLKiznsd1Rv15OImWz58A=";
+    hash = "sha256-rtUnvGF3vyS8Id06vllctuHFqf+iWSDMlKmGZ7Q42tA=";
   };
 
   nativeBuildInputs = [
@@ -55,7 +55,7 @@ stdenv.mkDerivation (finalAttrs: {
   '';
 
   meta = {
-    description = "Qingluan desktop frontend (prebuilt static dist)";
+    description = "Qingluan web frontend (prebuilt static dist)";
     platforms = lib.platforms.linux;
     license = lib.licenses.agpl3Plus;
   };

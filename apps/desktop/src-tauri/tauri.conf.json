@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "identifier": "com.qingluan.desktop",
   "build": {
-    "beforeDevCommand": "bun run dev",
-    "beforeBuildCommand": "bun run build",
+    "beforeDevCommand": "cd ../web && bun run dev",
+    "beforeBuildCommand": "cd ../web && bun run build",
     "devUrl": "http://localhost:5173",
-    "frontendDist": "../frontend/dist"
+    "frontendDist": "../../web/dist"
   },
   "app": {
     "windows": [

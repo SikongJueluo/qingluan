@@ -29,8 +29,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
     cp Cargo.lock apps/desktop/src-tauri/Cargo.lock
 
     substituteInPlace apps/desktop/src-tauri/tauri.conf.json \
-      --replace-fail '"beforeBuildCommand": "bun run build"' '"beforeBuildCommand": ""' \
-      --replace-fail '"frontendDist": "../frontend/dist"' '"frontendDist": "${frontend}"'
+      --replace-fail '"beforeBuildCommand": "cd ../web && bun run build"' '"beforeBuildCommand": ""' \
+      --replace-fail '"frontendDist": "../../web/dist"' '"frontendDist": "${frontend}"'
   '';
 
   cargoLock.lockFile = ../../Cargo.lock;

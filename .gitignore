@@ -37,8 +37,8 @@ target
 
 # Node
 node_modules
-apps/desktop/frontend/node_modules
-apps/desktop/frontend/dist
+apps/web/node_modules
+apps/web/dist
 
 # Tauri
 apps/desktop/src-tauri/target
@@ -54,7 +54,7 @@ docs/superpowers/
 
 # Quality reports
 target/quality/
-apps/desktop/frontend/coverage/
+apps/web/coverage/
 
 # Devenv
 .devenv*

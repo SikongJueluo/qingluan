@@ -139,6 +139,6 @@ daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
 ## Tauri Desktop
 
 - Tauri v2 shell，`apps/desktop/src-tauri/`
-- 前端 `apps/desktop/frontend/`（Vue/Vite/bun）
+- 前端 `apps/web/`（Vue/Vite/bun，与 `apps/desktop` 平级，Tauri 与 daemon 共用产物）
 - Tauri commands 调用 daemon HTTP API
 - 预留 sidecar 打包 `qingluan-daemon` 和 `qingluan-cli`

@@ -56,10 +56,10 @@ qingluan-pi → qingluan-client → 生成的 TS 协议代码
 - 保留 CLI/daemon 两个二进制；旧 HTTP 调用首版暂时保留。
 - 不改造 `qingluan-sandbox`，不提前创建通用远端执行框架。
 
-## `apps/desktop/` 结构
+## `apps/` 结构
 
 | 路径 | 说明 |
 |------|------|
-| `frontend/` | Vue 3 + Vite + shadcn-vue 前端 |
-| `src-tauri/` | Tauri v2 Rust 壳（薄封装，调用 daemon API） |
-| `src-tauri/binaries/` | Tauri sidecar 外部二进制预留目录 |
+| `apps/web/` | Vue 3 + Vite + shadcn-vue 前端（Tauri 与 daemon 共用产物） |
+| `apps/desktop/src-tauri/` | Tauri v2 Rust 壳（薄封装，调用 daemon API） |
+| `apps/desktop/src-tauri/binaries/` | Tauri sidecar 外部二进制预留目录 |
