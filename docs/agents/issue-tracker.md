@@ -1,56 +1,30 @@
-# Issue tracker: Plane
+# Issue tracker: Local Markdown
 
-Issues and specs for this repo live in the Plane project **QINGLUAN** (id
-`eadf46e8-a81b-4451-994b-5d3a03c8c05b`). All operations go through the `plane`
-MCP server's tools — there is no CLI.
+Issues and specs for this repo live as markdown files in `.scratch/`.
 
 ## Conventions
 
-- **Create an issue**: `plane_workitem` action `create` with `project_id` and
-  `name`; body goes in `description_stripped` (plain text) or
-  `description_html`. Labels/states take UUIDs — `plane_label` / `plane_state`
-  `list` first if you only have names.
-- **Read an issue**: `plane_workitem` `retrieve_by_identifier` with
-  `workitem_identifier` like `QINGLUAN-42`; expand comments via
-  `plane_workitem_comment` `list`.
-- **List issues**: `plane_workitem` `list` with `project_id`, optionally
-  filtered with `pql` (syntax: `plane_get_pql_reference`).
-- **Comment**: `plane_workitem_comment` `create`.
-- **Apply / remove labels**: `plane_workitem` `manage_label` with
-  `add_label_id` / `remove_label_id` (merges; removals apply first).
-- **Close**: `plane_workitem` `update` with `state` set to the UUID of the
-  Done (`completed`) state. Cancelled issues use the `cancelled` state.
-
-## States
-
-The project uses Plane's default workflow: Backlog (backlog, default), Todo
-(unstarted), In Progress (started), Done (completed), Cancelled (cancelled).
+- One feature per directory: `.scratch/<feature-slug>/`
+- The spec is `.scratch/<feature-slug>/spec.md`
+- Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never a single combined tickets file
+- Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
+- Comments and conversation history append to the bottom of the file under a `## Comments` heading
 
 ## When a skill says "publish to the issue tracker"
 
-Create a Plane work item in project QINGLUAN.
+Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).
 
 ## When a skill says "fetch the relevant ticket"
 
-`plane_workitem` `retrieve_by_identifier` + `plane_workitem_comment` `list`.
+Read the file at the referenced path. The user will normally pass the path or the issue number directly.
 
 ## Wayfinding operations
 
-Used by `/wayfinder`. The **map** is a single work item with **child** work
-items as tickets.
+Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
 
-- **Map**: one work item labelled `wayfinder:map`, holding the Notes /
-  Decisions-so-far / Fog in its description.
-- **Child ticket**: a work item whose `parent` is the map. Labels:
-  `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed,
-  the ticket is assigned to the driving dev.
-- **Blocking**: `plane_workitem_relation` — add a `blocked_by` relation from
-  child to blocker. A ticket is unblocked when every blocker is in a
-  `completed` state.
-- **Frontier query**: list the map's open children (`plane_workitem` `list`,
-  PQL on parent + state), drop any with an open blocker or an assignee; first
-  in sort order wins.
-- **Claim**: `plane_workitem` `manage_assignee` `add_user_id` — the session's
-  first write.
-- **Resolve**: comment the answer, move state to Done, then append a context
-  pointer to the map's Decisions-so-far (map description edit).
+- **Map**: `.scratch/<effort>/map.md` (the Notes / Decisions-so-far / Fog body).
+- **Child ticket**: `.scratch/<effort>/issues/NN-<slug>.md`, numbered from `01`, with the question in the body. A `Type:` line records the ticket type (`research`/`prototype`/`grilling`/`task`); a `Status:` line records `claimed`/`resolved`.
+- **Blocking**: a `Blocked by: NN, NN` line near the top. A ticket is unblocked when every file it lists is `resolved`.
+- **Frontier**: scan `.scratch/<effort>/issues/` for files that are open, unblocked, and unclaimed; first by number wins.
+- **Claim**: set `Status: claimed` and save before any work.
+- **Resolve**: append the answer under an `## Answer` heading, set `Status: resolved`, then append a context pointer (gist + link) to the map's Decisions-so-far in `map.md`.
