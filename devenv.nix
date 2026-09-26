@@ -37,5 +37,36 @@
     };
   };
 
-  # See full reference at https://devenv.sh/reference/options/
+  integrations.gitnr.".gitignore" = {
+    templates = [
+      "gh:Node"
+      "gh:Rust"
+      "gh:Nix"
+    ];
+
+    content = [
+      # Devenv
+      ".devenv*"
+      "devenv.local.nix"
+      "devenv.local.yaml"
+
+      # direnv
+      ".direnv"
+
+      # pre-commit
+      ".pre-commit-config.yaml"
+
+      # others
+      ".env"
+      "**/dist-types/"
+      "/target/"
+      "**/target/"
+
+      # protobuf IR cross-language roundtrip fixtures
+      "packages/ir-proto/tests/fixtures/"
+
+      # CLI test-generated entries that must resolve workspace packages
+      "packages/cli/.test-fixtures/"
+    ];
+  };
 }
