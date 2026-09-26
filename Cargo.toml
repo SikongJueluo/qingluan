@@ -24,6 +24,7 @@ axum = "0.8"
 console = "0.15"
 crc32fast = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 dirs = "6"
 figment = { version = "0.10", features = ["toml", "env"] }

@@ -71,7 +71,14 @@
         {
           default = devenv.lib.mkShell {
             inherit inputs pkgs;
-            modules = [ (import ./devenv.nix) ];
+            modules = [
+              (import ./devenv.nix)
+              {
+                # flake check evaluates without a usable PWD; pin the root
+                # so the devenv module can resolve project files.
+                devenv.root = self.outPath;
+              }
+            ];
           };
         }
       );

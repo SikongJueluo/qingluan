@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use console::{Alignment, Style, Term, measure_text_width, pad_str, style, truncate_str};
 use dialoguer::{Confirm, FuzzySelect, Input, theme::ColorfulTheme};
 use qingluan_core::workspace::{
@@ -65,6 +65,12 @@ enum Commands {
         /// Machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Generate shell completions (bash, fish, zsh, elvish, powershell)
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
     },
 }
 
@@ -178,6 +184,14 @@ async fn main() {
                     .await;
                 }
             }
+        }
+        Commands::Completions { shell } => {
+            // Buffer, then write once: a closed pipe (`| head`) exits quietly
+            // instead of panicking inside the generator.
+            let mut buf: Vec<u8> = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "qingluan", &mut buf);
+            use std::io::Write as _;
+            let _ = std::io::stdout().lock().write_all(&buf);
         }
     }
 }

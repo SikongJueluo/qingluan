@@ -34,6 +34,17 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   doCheck = false;
 
+  # Standard completion dirs: NixOS/Home Manager users get these for free;
+  # everyone else can `qingluan completions <shell>` (starship-style).
+  postInstall = ''
+    $out/bin/qingluan completions bash > qingluan.bash
+    $out/bin/qingluan completions fish > qingluan.fish
+    $out/bin/qingluan completions zsh > _qingluan
+    install -Dm644 qingluan.bash $out/share/bash-completion/completions/qingluan
+    install -Dm644 qingluan.fish $out/share/fish/vendor_completions.d/qingluan.fish
+    install -Dm644 _qingluan $out/share/zsh/site-functions/_qingluan
+  '';
+
   meta = {
     description = "Qingluan CLI and daemon";
     mainProgram = "qingluan";
