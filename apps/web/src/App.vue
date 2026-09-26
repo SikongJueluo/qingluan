@@ -41,14 +41,6 @@
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton as-child>
-                  <router-link to="/code-review">
-                    <GitPullRequest />
-                    <span>代码审查</span>
-                  </router-link>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton as-child>
                   <router-link to="/kanban">
                     <Kanban />
                     <span>任务看板</span>
@@ -94,7 +86,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from '@/components/ui/sidebar'
-import { FileText, GitPullRequest, Home, Bird, Kanban } from 'lucide-vue-next'
+import { FileText, Home, Bird, Kanban } from 'lucide-vue-next'
 </script>
 
 <style scoped></style>

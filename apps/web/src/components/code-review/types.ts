@@ -1,12 +1,21 @@
 export type ChangeStatus = 'modified' | 'added' | 'deleted'
 
-export interface ChangedFile {
+/**
+ * Per-file metadata served by `GET /reviews/{id}/files` (two-level
+ * loading: the list stays cheap; full text is fetched per file).
+ */
+export interface ChangedFileMeta {
   path: string
   status: ChangeStatus
-  oldText: string
-  newText: string
   additions: number
   deletions: number
+  binary: boolean
+}
+
+/** Metadata plus the file contents (after `?side=` fetch). */
+export interface ChangedFile extends ChangedFileMeta {
+  oldText: string
+  newText: string
 }
 
 /**

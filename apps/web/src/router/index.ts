@@ -21,7 +21,7 @@ const router = createRouter({
       component: () => import('@/views/KanbanBoardView.vue'),
     },
     {
-      path: '/code-review',
+      path: '/review/:id',
       name: 'code-review',
       component: () => import('@/views/CodeReviewView.vue'),
     },
