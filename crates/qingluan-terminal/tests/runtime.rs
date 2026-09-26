@@ -1831,7 +1831,7 @@ async fn tail_snapshot_reports_the_unfinished_line_while_output_is_open() {
             .tail(&terminal, ReadLimits::DEFAULT)
             .await
             .expect("tail");
-        assert!(view.tail().truncated() == false);
+        assert!(!view.tail().truncated());
         text = view.tail().text().to_owned();
         if !text.is_empty() {
             break;

@@ -156,12 +156,13 @@ impl TailLine {
     /// for the next base character when there is none.
     fn attach_mark(&mut self, mark: char) {
         let added = mark.len_utf8();
-        if self.cursor > 0 && self.cursor <= self.cells.len() {
-            if let Some(cell) = self.cells.get_mut(self.cursor - 1) {
-                cell.marks.push(mark);
-                self.bytes += added;
-                return;
-            }
+        if self.cursor > 0
+            && self.cursor <= self.cells.len()
+            && let Some(cell) = self.cells.get_mut(self.cursor - 1)
+        {
+            cell.marks.push(mark);
+            self.bytes += added;
+            return;
         }
         self.pending_marks.push(mark);
         self.bytes += added;
@@ -622,7 +623,7 @@ impl vte::Perform for Performer<'_> {
             // line break rather than a screen clear: this normalizer has no
             // screen, and dropping real output would be worse than one extra
             // boundary.
-            0x0A | 0x0B | 0x0C => {
+            0x0A..=0x0C => {
                 drain_finalization(&mut self.state, &mut self.ready, Finalize::Separator)
             }
             // CR returns to the start of the line; later text overwrites in
@@ -727,12 +728,17 @@ mod tests {
         Arc::new(Mutex::new(TailState::new(log(), TailId::new("tail"), 1)))
     }
 
+    /// Finalized lines as `(line_number, text)`.
+    type Lines = Vec<(u64, String)>;
+    /// Explicit losses as `(first_line, dropped_line_count)`.
+    type Losses = Vec<(u64, u64)>;
+
     fn tail_text(state: &Arc<Mutex<TailState>>) -> String {
         state.lock().unwrap().snapshot().text().to_owned()
     }
 
     /// Drain everything the normalizer has queued so far.
-    fn drain(normalizer: &mut Normalizer) -> (Vec<(u64, String)>, Vec<(u64, u64)>) {
+    fn drain(normalizer: &mut Normalizer) -> (Lines, Losses) {
         let mut lines = Vec::new();
         let mut losses = Vec::new();
         collect(normalizer, &mut lines, &mut losses);
@@ -741,7 +747,7 @@ mod tests {
 
     /// Feed chunks, then the end of output, and return every finalized line
     /// and explicit loss in order.
-    fn run(normalizer: &mut Normalizer, chunks: &[&[u8]]) -> (Vec<(u64, String)>, Vec<(u64, u64)>) {
+    fn run(normalizer: &mut Normalizer, chunks: &[&[u8]]) -> (Lines, Losses) {
         let mut lines = Vec::new();
         let mut losses = Vec::new();
         for chunk in chunks {
@@ -751,11 +757,7 @@ mod tests {
         (lines, losses)
     }
 
-    fn collect(
-        normalizer: &mut Normalizer,
-        lines: &mut Vec<(u64, String)>,
-        losses: &mut Vec<(u64, u64)>,
-    ) {
+    fn collect(normalizer: &mut Normalizer, lines: &mut Lines, losses: &mut Losses) {
         while let Some(item) = normalizer.next_pending() {
             match item {
                 PendingLine::Line { line, text } => lines.push((line, text)),
@@ -764,10 +766,7 @@ mod tests {
         }
     }
 
-    fn run_to_end(
-        normalizer: &mut Normalizer,
-        chunks: &[&[u8]],
-    ) -> (Vec<(u64, String)>, Vec<(u64, u64)>) {
+    fn run_to_end(normalizer: &mut Normalizer, chunks: &[&[u8]]) -> (Lines, Losses) {
         let (mut lines, mut losses) = run(normalizer, chunks);
         normalizer.finish();
         collect(normalizer, &mut lines, &mut losses);

@@ -319,7 +319,7 @@ async fn prune_is_explicit_contiguous_and_sequence_continues_after_full_prune() 
     let s = session("pi", "s-prune");
     for i in 0..3 {
         let t = terminal("pi", "s-prune", &format!("t{i}"));
-        exit_new_terminal(&store, &t, ExitResult::ExitCode(i as i32)).await;
+        exit_new_terminal(&store, &t, ExitResult::ExitCode(i)).await;
     }
 
     // Prune beyond the acked bound is refused and deletes nothing.
@@ -379,7 +379,7 @@ async fn stale_replay_after_prune_is_refused_with_recovery_bound() {
     let s = session("pi", "s-stale");
     for i in 0..4 {
         let t = terminal("pi", "s-stale", &format!("t{i}"));
-        exit_new_terminal(&store, &t, ExitResult::ExitCode(i as i32)).await;
+        exit_new_terminal(&store, &t, ExitResult::ExitCode(i)).await;
     }
     store.ack_events(&s, 3).await.unwrap();
     store.prune_events(&s, 3).await.unwrap();
@@ -502,7 +502,7 @@ async fn watermarks_and_unpruned_events_survive_restart() {
         let s = session("pi", "s-restart");
         for i in 0..2 {
             let t = terminal("pi", "s-restart", &format!("t{i}"));
-            exit_new_terminal(&store, &t, ExitResult::ExitCode(i as i32)).await;
+            exit_new_terminal(&store, &t, ExitResult::ExitCode(i)).await;
         }
         store.ack_events(&s, 1).await.unwrap();
         store.prune_events(&s, 1).await.unwrap();

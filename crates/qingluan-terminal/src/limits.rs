@@ -137,7 +137,9 @@ mod tests {
         assert_eq!(TAIL_MAX_BYTES, 64 * 1024);
         assert_eq!(TAIL_MAX_CELLS, 8192);
         assert_eq!(TAB_WIDTH, 8);
-        assert!(TAIL_MAX_CELLS <= TAIL_MAX_BYTES);
+        const {
+            assert!(TAIL_MAX_CELLS <= TAIL_MAX_BYTES);
+        }
     }
 
     #[test]
