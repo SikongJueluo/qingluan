@@ -22,7 +22,7 @@ NixOS 用 `nixosModules.qingluan`，选项相同。临时体验：`nix run githu
 ## 使用
 
 ```bash
-qingluan-daemon            # 启动 daemon（127.0.0.1:47129）
+qingluan daemon start       # 启动 daemon（默认 127.0.0.1:47129；--host 0.0.0.0 监听局域网）
 qingluan health            # 健康检查
 qingluan workspace list    # workspace 列表
 qingluan workspace add foo # 新建 workspace（默认 ~/Projects/.workspace/<repo>/foo）

@@ -12,7 +12,7 @@ frontend-test:
 
 # Rust
 daemon-dev:
-    cargo run -p qingluan-daemon
+    cargo run -p qingluan-cli -- daemon start
 
 # Backend + frontend in parallel (formerly `cargo-make dev`)
 dev:
@@ -20,7 +20,7 @@ dev:
 
 # Watch mode daemon rebuilds (requires cargo-watch, in devenv packages)
 daemon-watch:
-    cargo watch -w crates/qingluan-daemon -w crates/qingluan-protocol -w crates/qingluan-sandbox -x "run -p qingluan-daemon"
+    cargo watch -w crates/qingluan-daemon -w crates/qingluan-protocol -w crates/qingluan-sandbox -x "run -p qingluan-cli -- daemon start"
 
 cli ARGS='':
     cargo run -p qingluan-cli -- {{ARGS}}

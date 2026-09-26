@@ -10,7 +10,7 @@
 
 - **`qingluan-terminal` 是唯一的执行外部缝**。对上层只暴露终端生命周期与观察操作：`start(program, args, cwd, env, size)`、有界 `send`、`resize`、幂等 `stop`、状态快照、带类型化游标的输出读取与订阅、生命周期事件流。签名使用 `qingluan-core::terminal` 的领域类型。
 - **缝内私藏**：PTY master fd 与自管 `AsyncFd` 写路径、每终端 cgroup v2 与 pidfd 信号、输入分块／队列／期限、行式规范化、存储批处理与恢复。这些细节不出现在任何公开签名。
-- **gRPC 是适配器**：`qingluan-protocol` 的生成类型只活在 `qingluan-daemon` 的转换层。protobuf 概念（字段编号、oneof、trailer）不得穿透进 terminal／core；反向，daemon 不接触 PTY／cgroup／SQLite 细节，不维护第二套终端状态机。
+- **gRPC 是适配器**：`qingluan-protocol` 的生成类型只活在 `qingluan-daemon` lib 的转换层。protobuf 概念（字段编号、oneof、trailer）不得穿透进 terminal／core；反向，daemon 不接触 PTY／cgroup／SQLite 细节，不维护第二套终端状态机。
 - **存储实现私有**：terminal 依赖 `qingluan-storage` 的窄接口（追加、提交水位、恢复、游标查询、事件事务）。SQLite、segment 帧、CRC、迁移全部是 storage 内部。除非出现真实的第二后端，不引入存储 trait 抽象。
 - **Pi adapter 与 TS client 是 gRPC 之上的适配器**：TS client 不依赖 pi；pi adapter 只做宿主 session 映射、审批与通知，不实现第二套状态机。
 - 依赖方向不变：daemon → terminal → storage → core；terminal 直接使用 core。

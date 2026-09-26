@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "qingluan-daemon"
-path = "src/main.rs"
+# Lib-only: the server runs via the unified CLI entry (`qingluan daemon start`).
 
 [dependencies]
+anyhow.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true

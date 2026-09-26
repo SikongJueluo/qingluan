@@ -118,10 +118,11 @@ daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
   当前 workspace 则 `ctx.newSession()`（无 workspace 切换，无需 fork）
 - 守卫：无 UI（`ctx.hasUI`）、当前 session 未持久化（无法 fork）
 
-## Daemon (`qingluan-daemon`)
+## Daemon (`qingluan daemon start`)
 
-- 本地 HTTP 服务，监听地址来自 [`qingluan-config`](#配置-qingluan-config)
-  （默认 `127.0.0.1:47129`；配置损坏时启动即硬失败）
+- 本地 HTTP 服务，由 CLI 唯一入口 `qingluan daemon start` 启动（qingluan-daemon
+  crate 为纯 lib），监听地址来自 [`qingluan-config`](#配置-qingluan-config)
+  （默认 `127.0.0.1:47129`；`--host`/`--port` 可临时覆盖；配置损坏时启动即硬失败）
 - Axum 路由：`/health`, `/tasks`, `/tasks/:id`, `/tasks/:id/events`, `/sandboxes`
 
 ## 配置 (`qingluan-config`)
@@ -141,4 +142,4 @@ daemon 的 task/sandbox 执行引擎尚未实现，CLI 不暴露 `task`/`ui`
 - Tauri v2 shell，`apps/desktop/src-tauri/`
 - 前端 `apps/web/`（Vue/Vite/bun，与 `apps/desktop` 平级，Tauri 与 daemon 共用产物）
 - Tauri commands 调用 daemon HTTP API
-- 预留 sidecar 打包 `qingluan-daemon` 和 `qingluan-cli`
+- 预留 sidecar 打包 `qingluan`（CLI + 内置 daemon，单一二进制）

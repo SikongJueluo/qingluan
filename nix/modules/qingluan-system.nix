@@ -21,7 +21,7 @@ in
         frontend = pkgs.callPackage ../packages/frontend.nix { root = ../..; };
       };
       defaultText = lib.literalExpression "pkgs.callPackage ../packages/qingluan.nix { }";
-      description = "The qingluan package providing the `qingluan` CLI and `qingluan-daemon`.";
+      description = "The qingluan package providing the `qingluan` CLI (with the embedded daemon).";
     };
 
     desktop = {

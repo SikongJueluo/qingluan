@@ -2929,6 +2929,7 @@ dependencies = [
  "dialoguer",
  "qingluan-config",
  "qingluan-core",
+ "qingluan-daemon",
  "qingluan-protocol",
  "reqwest 0.12.28",
  "serde",
@@ -2959,6 +2960,7 @@ dependencies = [
 name = "qingluan-daemon"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "include_dir",
  "qingluan-config",

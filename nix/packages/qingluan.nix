@@ -5,7 +5,8 @@
   root,
 }:
 
-# CLI (`qingluan`) + daemon (`qingluan-daemon`) from the cargo workspace.
+# CLI (`qingluan`) — single entry point: client commands plus the embedded
+# daemon (`qingluan daemon start`, served from the qingluan-daemon lib).
 # The Tauri desktop app is packaged separately as qingluan-desktop to keep the
 # GUI closure (webkitgtk etc.) out of headless installs.
 rustPlatform.buildRustPackage (finalAttrs: {
@@ -27,8 +28,6 @@ rustPlatform.buildRustPackage (finalAttrs: {
   cargoBuildFlags = [
     "--package"
     "qingluan-cli"
-    "--package"
-    "qingluan-daemon"
   ];
   cargoTestFlags = finalAttrs.cargoBuildFlags;
 
@@ -46,7 +45,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   '';
 
   meta = {
-    description = "Qingluan CLI and daemon";
+    description = "Qingluan CLI with embedded daemon";
     mainProgram = "qingluan";
     platforms = lib.platforms.linux;
     license = lib.licenses.agpl3Plus;

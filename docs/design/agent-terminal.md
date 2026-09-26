@@ -42,7 +42,7 @@ TS client 是自行实现的薄通信封装，不是自造网络栈。它不负�
 - 复用 `qingluan-storage`：SQLx、迁移、分段日志、索引、事件事务与恢复；不反向依赖 terminal。
 - 在 `qingluan-core::terminal` 放 terminal/storage 共用的领域类型与纯规则，不依赖 gRPC、SQLx 或 PTY。
 - `qingluan-protocol` 承载生成的 Protobuf/RPC 类型，暂时保留原有 HTTP DTO；领域类型不直接采用生成类型。
-- `qingluan-daemon` 组装模块、启动服务、处理 RPC 与领域类型转换，不维护第二套终端状态机。
+- `qingluan daemon start` 组装模块、启动服务、处理 RPC 与领域类型转换，不维护第二套终端状态机。
 - `qingluan-config` 加载和校验 socket、容量、租期等配置；`qingluan-cli` 提供人类管理与只读观察入口。
 - 新增 `packages/qingluan-client`：TS 生成代码、异步封装、租约、重连和错误解码；现有 `packages/qingluan-pi` 接入审批、工具与通知。
 - 顶层 `proto/` 是协议唯一定义来源，Rust/TS 从同一来源生成。

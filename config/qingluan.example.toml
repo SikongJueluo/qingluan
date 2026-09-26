@@ -18,8 +18,9 @@
 root = "~/Projects/.workspace"   # ← built-in default
 
 [daemon]
-# Listen address. Consumed by: qingluan-daemon (bind) and qingluan health
-# (default --daemon-url).
+# Listen address. Consumed by: qingluan daemon start (bind) and qingluan
+# health (default --daemon-url). Use 0.0.0.0 to accept LAN connections;
+# the CLI maps that back to 127.0.0.1 for its own client connections.
 host = "127.0.0.1"
 port = 47129
 

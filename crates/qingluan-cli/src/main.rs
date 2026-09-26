@@ -67,10 +67,30 @@ enum Commands {
         json: bool,
     },
 
+    /// Run the Qingluan daemon (HTTP API + web UI) in the foreground.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+
     /// Generate shell completions (bash, fish, zsh, elvish, powershell)
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonAction {
+    /// Start the daemon (binds daemon.host:daemon.port from the config).
+    Start {
+        /// Override daemon.host from the config (e.g. 0.0.0.0 for LAN).
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Override daemon.port from the config.
+        #[arg(long)]
+        port: Option<u16>,
     },
 }
 
@@ -185,6 +205,24 @@ async fn main() {
                 }
             }
         }
+        Commands::Daemon { action } => {
+            // Same hard-fail semantics the daemon binary used to have:
+            // malformed config must abort startup, never fall back.
+            let config = qingluan_config::load().unwrap_or_else(|e| {
+                eprintln!("invalid configuration: {e}");
+                std::process::exit(1);
+            });
+            match action {
+                DaemonAction::Start { host, port } => {
+                    let host = host.unwrap_or(config.daemon.host);
+                    let port = port.unwrap_or(config.daemon.port);
+                    if let Err(e) = qingluan_daemon::serve(&host, port).await {
+                        eprintln!("daemon failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
         Commands::Completions { shell } => {
             // Buffer, then write once: a closed pipe (`| head`) exits quietly
             // instead of panicking inside the generator.
@@ -201,7 +239,13 @@ async fn main() {
 fn resolve_daemon_url(daemon_url: Option<&str>) -> String {
     daemon_url.map(str::to_owned).unwrap_or_else(|| {
         let config = qingluan_config::load().unwrap_or_else(|e| machine_error("config_invalid", e));
-        format!("http://{}:{}", config.daemon.host, config.daemon.port)
+        // A wildcard bind is a server-side notion; clients on the same
+        // machine always reach the daemon through loopback.
+        let host = match config.daemon.host.as_str() {
+            "0.0.0.0" | "::" | "" => "127.0.0.1",
+            h => h,
+        };
+        format!("http://{}:{}", host, config.daemon.port)
     })
 }
 
