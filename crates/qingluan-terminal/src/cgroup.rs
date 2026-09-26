@@ -310,7 +310,20 @@ impl DelegatedRoot {
         }
         let path = subtree.join(format!("qingluan-terminal-{tag}"));
         if !path.is_dir() {
-            fs::create_dir(&path).map_err(io_at(&path))?;
+            fs::create_dir(&path).map_err(|source| {
+                // cgroupfs mode bits can report the subtree control file as
+                // writable while child creation is still denied (e.g. no
+                // controllers delegated to this scope). That is a
+                // not-delegated environment, not a broken one.
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    CgroupError::DelegationUnavailable(format!(
+                        "cannot create child cgroup under {}: {source}",
+                        subtree.display()
+                    ))
+                } else {
+                    io_at(&path)(source)
+                }
+            })?;
         }
         if !path.join("cgroup.kill").is_file() {
             return Err(CgroupError::KernelSupport(format!(
