@@ -4,6 +4,7 @@
 //! exercise the review extraction against a real jj subprocess.
 
 pub mod review;
+pub mod web;
 
 use review::ReviewStore;
 

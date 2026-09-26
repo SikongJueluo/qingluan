@@ -16,7 +16,10 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ../packages/qingluan.nix { root = ../..; };
+      default = pkgs.callPackage ../packages/qingluan.nix {
+        root = ../..;
+        frontend = pkgs.callPackage ../packages/frontend.nix { root = ../..; };
+      };
       defaultText = lib.literalExpression "pkgs.callPackage ../packages/qingluan.nix { }";
       description = "The qingluan package providing the `qingluan` CLI and `qingluan-daemon`.";
     };

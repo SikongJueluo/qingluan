@@ -37,7 +37,10 @@
         {
           frontend = pkgs.callPackage ./nix/packages/frontend.nix { root = self; };
 
-          qingluan = pkgs.callPackage ./nix/packages/qingluan.nix { root = self; };
+          qingluan = pkgs.callPackage ./nix/packages/qingluan.nix {
+            root = self;
+            frontend = self.packages.${system}.frontend;
+          };
 
           qingluan-desktop = pkgs.callPackage ./nix/packages/qingluan-desktop.nix {
             root = self;

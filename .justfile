@@ -25,7 +25,7 @@ daemon-watch:
 cli ARGS='':
     cargo run -p qingluan-cli -- {{ARGS}}
 
-check:
+check: frontend-dist
     cargo check --workspace
 
 # Tauri. Invoked from apps/desktop because the tauri CLI finds src-tauri

@@ -1,6 +1,7 @@
 {
   lib,
   rustPlatform,
+  frontend,
   root,
 }:
 
@@ -12,6 +13,14 @@ rustPlatform.buildRustPackage (finalAttrs: {
   version = "0.1.0";
 
   src = "${root}";
+
+  # qingluan-daemon embeds apps/web/dist via include_dir!; the prebuilt
+  # frontend derivation fills it in (dist is gitignored, hence absent from
+  # the flake source).
+  postPatch = ''
+    mkdir -p apps/web/dist
+    cp -r ${frontend}/. apps/web/dist/
+  '';
 
   cargoLock.lockFile = ../../Cargo.lock;
 

@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use qingluan_daemon::{AppState, review};
+use qingluan_daemon::{AppState, review, web};
 use qingluan_protocol::{ApiResponse, CreateTaskRequest, HealthResponse, TaskEvent, TaskId};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -34,6 +34,7 @@ async fn main() {
         .route("/tasks/{id}/events", get(get_task_events))
         .route("/sandboxes", post(create_sandbox))
         .merge(review::router())
+        .fallback(web::fallback)
         .layer(CorsLayer::permissive())
         .with_state(Arc::new(state));
 
