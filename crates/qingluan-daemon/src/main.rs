@@ -4,16 +4,11 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use qingluan_daemon::{AppState, review};
 use qingluan_protocol::{ApiResponse, CreateTaskRequest, HealthResponse, TaskEvent, TaskId};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
-
-/// Shared application state.
-#[derive(Clone)]
-struct AppState {
-    version: String,
-}
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +25,7 @@ async fn main() {
     };
     let state = AppState {
         version: qingluan_core::version().to_string(),
+        ..Default::default()
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -37,6 +33,7 @@ async fn main() {
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/events", get(get_task_events))
         .route("/sandboxes", post(create_sandbox))
+        .merge(review::router())
         .layer(CorsLayer::permissive())
         .with_state(Arc::new(state));
 
