@@ -89,6 +89,7 @@
 - 任务相关测试：mock transport 解码单测 + 真 daemon 集成测试。
 - 停止条件：Node 最低版本（候选 ≥ 22.12.0，实测 22.23.2／24.19.0）与目标环境冲突。
 - 回滚／清理：独立包，可单独摘除。
+- S7 实现记录：独立包复用 S6 互操作验证过的 ts-proto 选项与固定版本（grpc-js 1.14.5、ts-proto 2.12.4、TypeScript 6.0.3、pnpm 11.21.0），生成代码落在包内 `src/generated/`（gitignore，仅作 typecheck/build 前置，不提交）；公开 API 只暴露九个 unary 封装与 bigint／十进制字符串助手，生成类型不外泄；租约状态机（held→uncertain→lost，10 s 续期、断线后须 renew 重确认）、未知结果三态 Outcome（明确的 `INVALID_ARGUMENT`／`NOT_FOUND` 为 failed，只有取消、deadline、断线等不确定状态为 unknown）、显式游标与 8 KiB rich error 降级矩阵由 mock transport 单测覆盖，互操作门 `just terminal-client-interop` 扩展了仅限测试的 fixture（可配 TTL、分页读、脚本化部分写入）验证 socket 0600、竞争、过期、daemon 中亡重连与部分写入；`just terminal-client` 为包级门，均已接入 `just quality` 与 GitHub quality workflow。
 
 ### S8 Pi adapter
 

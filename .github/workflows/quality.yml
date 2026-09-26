@@ -15,9 +15,20 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.21.0
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - name: Install system build tools
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install cargo-deny
         run: cargo install --locked cargo-deny
@@ -37,6 +48,16 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace --all-targets
+
+      - name: Terminal gRPC interoperability
+        run: bash tests/terminal-grpc-interop/run.sh
+
+      - name: Terminal TypeScript client quality
+        run: |
+          pnpm --dir packages/qingluan-client install --frozen-lockfile
+          pnpm --dir packages/qingluan-client run typecheck
+          pnpm --dir packages/qingluan-client test
+          bash packages/qingluan-client/scripts/e2e.sh
 
       - name: Frontend quality
         working-directory: apps/web

@@ -32,6 +32,18 @@ check: frontend-dist
 terminal-grpc-interop:
     bash tests/terminal-grpc-interop/run.sh
 
+# S7 qingluan-client package gate: generated-code precondition, typecheck,
+# and mock-transport unit tests.
+terminal-client:
+    pnpm --dir packages/qingluan-client install --frozen-lockfile
+    pnpm --dir packages/qingluan-client run typecheck
+    pnpm --dir packages/qingluan-client test
+
+# S7 fixture-backed end-to-end gate for the TS client (lease lifecycle,
+# expiry, partial writes, daemon death → reconnect).
+terminal-client-interop:
+    bash packages/qingluan-client/scripts/e2e.sh
+
 # Tauri. Invoked from apps/desktop because the tauri CLI finds src-tauri
 # by walking up from cwd (apps/web has no src-tauri ancestor); hooks
 # cd into ../web via tauri.conf.json.
@@ -41,7 +53,7 @@ tauri-dev:
 # ── Quality Gate ──
 
 # Full quality gate — Harness / CI entry point. Non-zero exit on failure.
-quality: quality-rust quality-fe terminal-grpc-interop
+quality: quality-rust quality-fe terminal-grpc-interop terminal-client terminal-client-interop
 
 # Build the frontend bundle so `tauri::generate_context!` (which requires
 # frontendDist to exist) compiles during clippy/test of qingluan-desktop.
