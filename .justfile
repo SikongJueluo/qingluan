@@ -28,9 +28,11 @@ cli ARGS='':
 check:
     cargo check --workspace
 
-# Tauri
+# Tauri. Invoked from apps/desktop because the tauri CLI finds src-tauri
+# by walking up from cwd (apps/web has no src-tauri ancestor); hooks
+# cd into ../web via tauri.conf.json.
 tauri-dev:
-    cd apps/desktop && bun tauri dev
+    cd apps/desktop && bunx --package @tauri-apps/cli tauri dev
 
 # ── Quality Gate ──
 
