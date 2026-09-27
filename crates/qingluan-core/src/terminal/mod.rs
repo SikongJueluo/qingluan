@@ -56,7 +56,7 @@ mod start;
 
 pub use control::ControlGeneration;
 pub use event::{
-    EventSequence, SessionEvent, SessionEventPayload, SessionEventState, WatermarkError,
+    EventPage, EventSequence, SessionEvent, SessionEventPayload, SessionEventState, WatermarkError,
 };
 pub use ids::{
     ExternalSessionId, LogEpoch, LogIdentity, SessionRef, SessionSource, TailId, TerminalId,

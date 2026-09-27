@@ -19,20 +19,32 @@ import {
   type ClientError,
   type UnknownReason,
 } from "./errors.js";
-import { GrpcUnaryTransport } from "./grpc-transport.js";
-import { grpcStatus, TransportFailure, type TerminalMethod, type UnaryTransport } from "./transport.js";
+import { GrpcTransport } from "./grpc-transport.js";
 import {
+  grpcStatus,
+  TransportFailure,
+  type StreamHandle,
+  type TerminalMethod,
+  type TerminalTransport,
+} from "./transport.js";
+import {
+  fromAckSessionEventsResponse,
   fromReadResponse,
   fromStopResponse,
   fromTailResponse,
+  fromWatchSessionEventsResponse,
+  toAckSessionEventsRequest,
   toLimits,
   toReadPosition,
   toSendRequest,
   toSession,
   toStartRequest,
   toTerminal,
+  toWatchSessionEventsRequest,
   type ReadPage,
   type ReadPosition,
+  type SessionEventBatch,
+  type SessionEventState,
   type SessionRef,
   type StartSpec,
   type TailResult,
@@ -40,8 +52,10 @@ import {
   type TerminalSnapshot,
   type QueryLimits,
 } from "./wire.js";
+import { assertUint64 } from "./ids.js";
 import type {
   AcquireControlResponse,
+  AckSessionEventsResponse,
   GetServerInfoResponse,
   ReadResponse,
   RenewControlResponse,
@@ -49,6 +63,7 @@ import type {
   StartResponse,
   StopResponse,
   TailResponse,
+  WatchSessionEventsResponse,
 } from "./generated/qingluan/terminal/v1/terminal.js";
 
 /** Advisory renewal cadence from the protocol (TTL is 30 s server-side). */
@@ -88,7 +103,7 @@ export interface TerminalClientOptions {
   /** Path of the daemon's Unix-domain socket. */
   socketPath: string;
   /** Injectable transport; defaults to grpc-js over the UDS. */
-  transport?: UnaryTransport;
+  transport?: TerminalTransport;
   defaultDeadlineMs?: number;
   connectTimeoutMs?: number;
   /**
@@ -146,7 +161,7 @@ const leaseRecords = new WeakMap<ControlLease, LeaseRecord>();
 
 export class TerminalClient {
   readonly socketPath: string;
-  private readonly transport: UnaryTransport;
+  private readonly transport: TerminalTransport;
   private readonly defaultDeadlineMs: number;
   private readonly connectTimeoutMs: number;
   private readonly renewIntervalMs: number;
@@ -162,7 +177,7 @@ export class TerminalClient {
       throw new TypeError("socketPath is required");
     }
     this.socketPath = options.socketPath;
-    this.transport = options.transport ?? new GrpcUnaryTransport(options.socketPath);
+    this.transport = options.transport ?? new GrpcTransport(options.socketPath);
     this.defaultDeadlineMs = options.defaultDeadlineMs ?? DEFAULT_DEADLINE_MS;
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.renewIntervalMs = options.renewIntervalMs ?? DEFAULT_RENEW_INTERVAL_MS;
@@ -392,6 +407,121 @@ export class TerminalClient {
       options,
     );
     return fromTailResponse(response);
+  }
+
+  /**
+   * Watch a session's persistent lifecycle events as an async generator of
+   * bounded, ordered batches, starting strictly after `afterEventSeq`.
+   *
+   * - Lease-free and never auto-acknowledging: consumption confirmation is
+   *   a separate, side-effecting `ackSessionEvents` call.
+   * - The position is explicit and preserved: it advances only past fully
+   *   yielded batches/events. After a reconnectable transport loss the
+   *   generator resubscribes from exactly that position, so the client
+   *   never introduces duplicates itself (server-side duplicates across
+   *   reconnects remain possible and are the consumer's to dedupe).
+   * - Only reconnectable transport loss is retried: connection drops
+   *   (grpc-js surfaces them as `unavailable`) and a clean but unexpected
+   *   end of the server stream reconnect from the preserved position.
+   * - Every other stream failure — explicit server refusals (including the
+   *   typed `event_range_cleared` recovery bounds), storage degradation
+   *   (`data_loss`/`internal`/`unknown`), cancellations, deadlines, and
+   *   malformed events that fail closed — throws terminally; it is never
+   *   hidden behind a blind resubscription.
+   * - Cancelling the `signal` (or ending iteration) closes the call.
+   */
+  async *watchSessionEvents(
+    session: SessionRef,
+    afterEventSeq: bigint,
+    options?: CallOptions,
+  ): AsyncGenerator<SessionEventBatch, void, unknown> {
+    this.assertNotClosed();
+    assertUint64("afterEventSeq", afterEventSeq);
+    let position = afterEventSeq;
+    let handle: StreamHandle | undefined;
+    try {
+      for (;;) {
+        this.assertNotClosed();
+        handle = undefined;
+        try {
+          handle = this.transport.watch(
+            "watchSessionEvents",
+            toWatchSessionEventsRequest(session, position),
+            {
+              deadline:
+                options?.deadlineMs === undefined
+                  ? undefined
+                  : Date.now() + options.deadlineMs,
+              signal: options?.signal,
+            },
+          );
+          for await (const raw of handle.batches) {
+            // A malformed batch (e.g. an event with a missing payload)
+            // throws here, fail closed: the position never advances past an
+            // event the consumer could not interpret.
+            const batch = fromWatchSessionEventsResponse(raw as WatchSessionEventsResponse);
+            yield batch;
+            const last = batch.events[batch.events.length - 1];
+            if (last !== undefined) {
+              position = last.eventSeq;
+            }
+          }
+          // The server ended the stream cleanly (a follow stream should
+          // not silently stop): fall through and resubscribe from the
+          // preserved position after the bounded backoff.
+        } catch (error) {
+          if (!(error instanceof TransportFailure)) {
+            throw error;
+          }
+          if (this.connection === "closed" || options?.signal?.aborted) {
+            throw this.decodeClientError(error) ?? this.genericError(error);
+          }
+          if (error.code === grpcStatus.unavailable) {
+            // Reconnectable transport loss only: grpc-js surfaces a lost
+            // connection as `unavailable`. Mark the leases uncertain and
+            // wait for the channel to be ready again before resubscribing
+            // from the preserved position.
+            this.noteTransportFailure();
+            await this.whenReady();
+          } else {
+            // Every other status is surfaced terminally: explicit server
+            // refusals (typed rich errors such as event_range_cleared),
+            // storage degradation (internal/data_loss/unknown),
+            // cancellations and deadlines. Retrying those would hide an
+            // explicit failure behind a blind resubscription.
+            throw this.decodeClientError(error) ?? this.genericError(error);
+          }
+        }
+        await delay(RECONNECT_BACKOFF_MS);
+      }
+    } finally {
+      // Ending iteration (break/return/throw) or unwinding after a terminal
+      // failure always closes the underlying call.
+      handle?.cancel();
+    }
+  }
+
+  /**
+   * Cumulatively acknowledge consumed session events up to `upToSeq`.
+   * Requires a held lease; like every side-effecting call it is never
+   * auto-retried — an ambiguous transport completion is reported as
+   * `unknown` and leaves the lease `uncertain` until a successful renew.
+   * A bound beyond the server's committed bound is a definite `failed`.
+   */
+  async ackSessionEvents(
+    lease: ControlLease,
+    upToSeq: bigint,
+    options?: CallOptions,
+  ): Promise<Outcome<SessionEventState>> {
+    const record = this.requireHeld(lease);
+    assertUint64("upToSeq", upToSeq);
+    return this.mutation<AckSessionEventsResponse, SessionEventState>(
+      lease,
+      "ackSessionEvents",
+      toAckSessionEventsRequest(this.controlContext(lease, record), upToSeq),
+      options,
+      fromAckSessionEventsResponse,
+    );
   }
 
   // ── internals ─────────────────────────────────────────────────────────

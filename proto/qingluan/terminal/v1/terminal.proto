@@ -2,9 +2,11 @@ syntax = "proto3";
 
 package qingluan.terminal.v1;
 
-// S6 production subset. Numbers are assigned so generated clients can be
-// exercised, but the complete v1 protocol is not declared frozen until the
-// consuming S8/S9 slices add and validate their deferred RPCs.
+// S6 production subset plus the S8 session-event RPCs (WatchSessionEvents
+// server-streaming, AckSessionEvents unary). Numbers are assigned so
+// generated clients can be exercised, but the complete v1 protocol is not
+// declared frozen until the consuming S9 slice adds and validates its
+// deferred RPCs.
 service TerminalService {
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
   rpc AcquireControl(AcquireControlRequest) returns (AcquireControlResponse);
@@ -15,6 +17,9 @@ service TerminalService {
   rpc Stop(StopRequest) returns (StopResponse);
   rpc Read(ReadRequest) returns (ReadResponse);
   rpc Tail(TailRequest) returns (TailResponse);
+  rpc WatchSessionEvents(WatchSessionEventsRequest)
+      returns (stream WatchSessionEventsResponse);
+  rpc AckSessionEvents(AckSessionEventsRequest) returns (AckSessionEventsResponse);
 }
 
 message SessionRef {
@@ -133,6 +138,47 @@ message SessionEventState {
   uint64 acked_through_seq = 1;
   uint64 last_committed_seq = 2;
   uint64 pruned_through_seq = 3;
+}
+
+// One persistent session lifecycle event. Self-explanatory: it carries the
+// full session identity and its own terminal_id so replay stays meaningful
+// even after the terminal record is deleted. `payload` must be one of the
+// known lifecycle kinds; a missing or unrecognized payload is invalid.
+message SessionEvent {
+  SessionRef session = 1;
+  uint64 event_seq = 2;
+  string terminal_id = 3;
+  oneof payload {
+    ExitResult process_exited = 4;
+    OutputEnd output_closed = 5;
+  }
+}
+
+message WatchSessionEventsRequest {
+  SessionRef session = 1;
+  // Explicit exclusive lower bound; there is no implicit cursor.
+  uint64 after_event_seq = 2;
+}
+
+// One bounded batch: at most the storage event page cap, strictly ordered
+// by event_seq, continuing from the request's after_event_seq. An empty
+// batch carries only the watermark snapshot (used to establish the initial
+// watermark while following). The next position is always the last emitted
+// event's event_seq (or the request bound when the batch is empty).
+message WatchSessionEventsResponse {
+  SessionEventState state = 1;
+  repeated SessionEvent events = 2;
+}
+
+message AckSessionEventsRequest {
+  ControlContext control = 1;
+  // Cumulative bound: repeats are harmless, regression is ignored, and a
+  // bound beyond last_committed_seq is refused.
+  uint64 up_to_seq = 2;
+}
+
+message AckSessionEventsResponse {
+  SessionEventState state = 1;
 }
 
 message LineFragment {

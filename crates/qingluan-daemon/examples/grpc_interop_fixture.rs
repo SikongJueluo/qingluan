@@ -1,5 +1,5 @@
 //! Test-only endpoint for `just terminal-grpc-interop` (S6) and
-//! `just terminal-client-interop` (S7).
+//! `just terminal-client-interop` (S7/S8).
 //!
 //! It serves the production `TerminalGrpcService` and socket lifecycle over a
 //! small fake runtime. The fake supplies deterministic bigint/read/delay
@@ -10,9 +10,14 @@
 //! client-facing scenarios: paged reads and tails with a stale-epoch
 //! `CursorExpired` path on terminals other than `fixture`, `start`/`stop`
 //! snapshots, scripted partial writes (`partial:<written>:<abort>`),
-//! configurable delays (`delay:<ms>`), and a lease TTL configurable through
-//! `FIXTURE_LEASE_TTL_MS` (default 30 s).
+//! configurable delays (`delay:<ms>`), a lease TTL configurable through
+//! `FIXTURE_LEASE_TTL_MS` (default 30 s), and the S8 event scenarios: a
+//! deterministic per-session event log (seeded by `external_id`, with a
+//! cleared-prefix session and a beyond-2^53 sequence session) plus dynamic
+//! appends through `event:exit:<code>` / `event:signal:<n>` /
+//! `event:closed:<end>` sends from a controlling client.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +30,7 @@ use qingluan_daemon::lease::{LeaseManager, MAX_LEASE_TTL};
 use qingluan_daemon::service::TerminalGrpcService;
 use qingluan_daemon::socket::BoundUnixSocket;
 use qingluan_protocol::terminal::v1::terminal_service_server::TerminalServiceServer;
-use qingluan_terminal::{RuntimeError, SendError};
+use qingluan_terminal::{RuntimeError, SendError, SendRejection};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
@@ -34,10 +39,113 @@ const CLIENT_EPOCH: &str = "client-fixture";
 /// Fixed upper line bound of the paged fixture history (lines 1..=3;
 /// history line numbers are 1-based).
 const PAGED_END_LINE: u64 = 4;
+/// A sequence strictly beyond 2^53, for bigint exactness over the wire.
+const BIG_EVENT_SEQ: u64 = 9_007_199_254_740_993;
+
+/// In-memory session event log mirroring the durable semantics the service
+/// relies on: ordered committed events, a cumulative ack watermark, and an
+/// optional pruned prefix that refuses earlier replays. `committed_floor`
+/// keeps the legacy S6 acquire sentinel (committed = u64::MAX) for sessions
+/// without a script.
+#[derive(Default)]
+struct EventLog {
+    events: Vec<domain::SessionEvent>,
+    acked: u64,
+    pruned: u64,
+    committed_floor: u64,
+}
+
+impl EventLog {
+    fn committed(&self) -> u64 {
+        self.events
+            .last()
+            .map(|event| event.event_seq.get())
+            .unwrap_or(0)
+            .max(self.committed_floor)
+    }
+
+    fn state(&self) -> domain::SessionEventState {
+        domain::SessionEventState::new(self.pruned, self.acked, self.committed()).unwrap()
+    }
+
+    fn append(&mut self, session: &domain::SessionRef, payload: domain::SessionEventPayload) {
+        let seq = self.committed() + 1;
+        self.events.push(domain::SessionEvent {
+            terminal: domain::TerminalRef {
+                session: session.clone(),
+                terminal_id: domain::TerminalId::new("client"),
+            },
+            event_seq: domain::EventSequence::new(seq).expect("sequence is non-zero"),
+            payload,
+        });
+    }
+
+    fn append_at(
+        &mut self,
+        session: &domain::SessionRef,
+        seq: u64,
+        terminal_id: &str,
+        payload: domain::SessionEventPayload,
+    ) {
+        self.events.push(domain::SessionEvent {
+            terminal: domain::TerminalRef {
+                session: session.clone(),
+                terminal_id: domain::TerminalId::new(terminal_id),
+            },
+            event_seq: domain::EventSequence::new(seq).expect("sequence is non-zero"),
+            payload,
+        });
+    }
+}
+
+/// Deterministically seed one session's event log by `external_id`. Unknown
+/// ids keep the legacy S6 bigint sentinel instead of a script.
+fn seed_event_log(session: &domain::SessionRef) -> EventLog {
+    let mut log = EventLog::default();
+    match session.external_id.as_str() {
+        // The S8 client scenarios: three replayable events.
+        "events" => {
+            log.append_at(session, 1, "client", payload_exit(0));
+            log.append_at(
+                session,
+                2,
+                "fixture",
+                domain::SessionEventPayload::OutputClosed(domain::OutputEnd::Eof),
+            );
+            log.append_at(
+                session,
+                3,
+                "client",
+                domain::SessionEventPayload::ProcessExited(domain::ExitResult::Signal(9)),
+            );
+        }
+        // A pruned prefix: replays before 5 are cleared, 6..=8 remain.
+        "events-cleared" => {
+            log.acked = 5;
+            log.pruned = 5;
+            log.append_at(session, 6, "client", payload_exit(1));
+            log.append_at(session, 7, "client", payload_exit(2));
+            log.append_at(session, 8, "client", payload_exit(3));
+        }
+        // A single event beyond 2^53: bigint exactness end to end.
+        "events-big" => {
+            log.append_at(session, BIG_EVENT_SEQ, "client", payload_exit(0));
+        }
+        _ => {
+            log.committed_floor = u64::MAX;
+        }
+    }
+    log
+}
+
+fn payload_exit(code: i32) -> domain::SessionEventPayload {
+    domain::SessionEventPayload::ProcessExited(domain::ExitResult::ExitCode(code))
+}
 
 struct FixtureBackend {
     generation: AtomicU64,
     started_size: Mutex<Option<domain::TerminalSize>>,
+    events: Mutex<HashMap<domain::SessionRef, EventLog>>,
 }
 
 #[async_trait]
@@ -52,9 +160,63 @@ impl TerminalBackend for FixtureBackend {
 
     async fn ensure_session(
         &self,
-        _session: &domain::SessionRef,
+        session: &domain::SessionRef,
     ) -> Result<domain::SessionEventState, RuntimeError> {
-        Ok(domain::SessionEventState::new(0, 0, u64::MAX).unwrap())
+        let mut events = self.events.lock().expect("event log");
+        let log = events
+            .entry(session.clone())
+            .or_insert_with(|| seed_event_log(session));
+        Ok(log.state())
+    }
+
+    async fn events_after(
+        &self,
+        session: &domain::SessionRef,
+        after_event_seq: u64,
+    ) -> Result<domain::EventPage, RuntimeError> {
+        // Seed on access as well as on acquire: a watch is lease-free and
+        // may legitimately be the first touch of a scripted session.
+        let mut events = self.events.lock().expect("event log");
+        let log = events
+            .entry(session.clone())
+            .or_insert_with(|| seed_event_log(session));
+        if after_event_seq < log.pruned {
+            return Err(RuntimeError::EventRangeCleared {
+                after_event_seq,
+                pruned_through_seq: log.pruned,
+                available_after_seq: log.pruned,
+            });
+        }
+        Ok(domain::EventPage {
+            state: log.state(),
+            events: log
+                .events
+                .iter()
+                .filter(|event| event.event_seq.get() > after_event_seq)
+                .cloned()
+                .collect(),
+            next_after_seq: None,
+        })
+    }
+
+    async fn ack_events(
+        &self,
+        session: &domain::SessionRef,
+        up_to_seq: u64,
+    ) -> Result<domain::SessionEventState, RuntimeError> {
+        let mut events = self.events.lock().expect("event log");
+        let log = events
+            .entry(session.clone())
+            .or_insert_with(|| seed_event_log(session));
+        let committed = log.committed();
+        if up_to_seq > committed {
+            return Err(RuntimeError::EventAckOutOfBounds {
+                up_to_seq,
+                last_committed_seq: committed,
+            });
+        }
+        log.acked = log.acked.max(up_to_seq);
+        Ok(log.state())
     }
 
     async fn start(
@@ -72,7 +234,7 @@ impl TerminalBackend for FixtureBackend {
 
     async fn send(
         &self,
-        _terminal: &domain::TerminalRef,
+        terminal: &domain::TerminalRef,
         _generation: domain::ControlGeneration,
         data: Vec<u8>,
     ) -> Result<domain::SendReceipt, SendError> {
@@ -103,6 +265,37 @@ impl TerminalBackend for FixtureBackend {
             return Err(SendError::Partial(domain::PartialWrite::new(
                 written, abort,
             )));
+        }
+        // S8 dynamic event appends: only a controlling client can send, so
+        // these create new committed events in the session's log. A legacy
+        // sentinel session (committed floor u64::MAX) has no script to
+        // append to and refuses instead of overflowing the sequence.
+        if let Some(rest) = data.strip_prefix(b"event:") {
+            let script = String::from_utf8_lossy(rest).into_owned();
+            let payload = match script.as_str() {
+                s if s.starts_with("exit:") => {
+                    let code = s["exit:".len()..].parse::<i32>().unwrap_or(0);
+                    payload_exit(code)
+                }
+                s if s.starts_with("signal:") => {
+                    let signal = s["signal:".len()..].parse::<i32>().unwrap_or(9);
+                    domain::SessionEventPayload::ProcessExited(domain::ExitResult::Signal(signal))
+                }
+                "closed:eof" => domain::SessionEventPayload::OutputClosed(domain::OutputEnd::Eof),
+                "closed:forced" => {
+                    domain::SessionEventPayload::OutputClosed(domain::OutputEnd::ForcedClose)
+                }
+                _ => payload_exit(0),
+            };
+            let mut events = self.events.lock().expect("event log");
+            let log = events
+                .entry(terminal.session.clone())
+                .or_insert_with(|| seed_event_log(&terminal.session));
+            if log.committed_floor == u64::MAX {
+                return Err(SendError::Rejected(SendRejection::Unknown));
+            }
+            log.append(&terminal.session, payload);
+            return Ok(domain::SendReceipt::new(data.len() as u64));
         }
         Ok(domain::SendReceipt::new(data.len() as u64))
     }
@@ -269,6 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn TerminalBackend> = Arc::new(FixtureBackend {
         generation: AtomicU64::new(1),
         started_size: Mutex::new(None),
+        events: Mutex::new(HashMap::new()),
     });
     let leases = LeaseManager::new(backend.clone(), ttl)?;
     let service = TerminalGrpcService::new(backend, leases, "interop-fixture");

@@ -4,6 +4,15 @@
 //! grant, release and expiry advances the terminal runtime's internal control
 //! generation while holding the same lease-table lock used for validation.
 //! This makes a stale token unable to commit another write fragment.
+//!
+//! Those generation transitions are additionally serialized with
+//! acknowledgements through a per-session async operation gate: an ack
+//! validates under the gate and holds it across its backend commit, so a
+//! release, expiry or new-controller takeover can never advance the
+//! generation past a parked ack. The gate map is process-lifetime state
+//! (one entry per session ever controlled) because removing entries could
+//! let two gates coexist for one session; the short-lived lease-table
+//! `Mutex` is never held across an await.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -11,6 +20,7 @@ use std::time::Duration;
 
 use qingluan_core::terminal::{ControlGeneration, SessionEventState, SessionRef};
 use qingluan_terminal::RuntimeError;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -27,12 +37,29 @@ struct LeaseInner {
     backend: Arc<dyn TerminalBackend>,
     ttl: Duration,
     leases: Mutex<HashMap<SessionRef, Lease>>,
+    /// Per-session lease-operation gates (see the module docs). Fetched
+    /// under a brief std lock, then awaited; never held across an await.
+    gates: Mutex<HashMap<SessionRef, Arc<AsyncMutex<()>>>>,
 }
 
 struct Lease {
     token: SecretToken,
     generation: ControlGeneration,
     expires_at: Instant,
+}
+
+impl LeaseInner {
+    fn session_gate(self: &Arc<Self>, session: &SessionRef) -> Arc<AsyncMutex<()>> {
+        let mut gates = self.gates.lock().expect("lease gates");
+        gates.entry(session.clone()).or_default().clone()
+    }
+}
+
+/// Holds a session's lease-operation gate across one acknowledgement's
+/// backend commit. Dropping the guard (after the commit finished) re-opens
+/// release, expiry and takeover for that session.
+pub struct LeaseAckGuard {
+    _gate: OwnedMutexGuard<()>,
 }
 
 /// A newly granted lease. Deliberately has no `Debug` implementation: the
@@ -140,8 +167,17 @@ impl LeaseManager {
                 backend,
                 ttl,
                 leases: Mutex::new(HashMap::new()),
+                gates: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Acquire the session's lease-operation gate: every path that grants,
+    /// invalidates, removes or replaces a lease (and therefore advances the
+    /// control generation) runs under this guard, and an acknowledgement
+    /// holds it from validation until its backend commit completes.
+    async fn lease_gate(&self, session: &SessionRef) -> OwnedMutexGuard<()> {
+        self.inner.session_gate(session).lock_owned().await
     }
 
     /// Acquire a fresh token. A live holder is never preempted. An expired
@@ -152,8 +188,15 @@ impl LeaseManager {
         // an in-memory token is granted.
         self.inner.backend.ensure_session(session).await?;
 
-        let now = Instant::now();
         let token = SecretToken::mint();
+        // The grant (or expired-holder replacement) is a generation
+        // transition: it queues behind any parked ack on the session's
+        // lease-operation gate, so a takeover always commits after it.
+        let gate = self.lease_gate(session).await;
+        // Read the clock only after waiting for the gate. Otherwise a long
+        // in-flight ack could make an already-expired holder look live, or
+        // create a replacement whose deadline had already elapsed.
+        let now = Instant::now();
         let generation = {
             let mut leases = self.inner.leases.lock().expect("lease table");
             if let Some(existing) = leases.get(session)
@@ -174,6 +217,7 @@ impl LeaseManager {
             );
             generation
         };
+        drop(gate);
 
         // Arm cleanup before the next await: cancellation or persistence
         // failure cannot strand an unpublished token in the lease table.
@@ -196,8 +240,23 @@ impl LeaseManager {
     }
 
     /// Validate one mutation request and return only the server-owned
-    /// generation. The wire never carries a generation number.
-    pub fn validate(
+    /// generation. The wire never carries a generation number. Validation
+    /// runs under the session's lease-operation gate because the lazy
+    /// expiry invalidation it may perform is itself a generation
+    /// transition that must not pass a parked ack; the guard is dropped
+    /// before the caller's backend work, where the runtime's generation
+    /// barrier takes over (Start/Send/Stop may still be preempted by a
+    /// release and must fail their side effect, not block it).
+    pub async fn validate(
+        &self,
+        session: &SessionRef,
+        control_token: &str,
+    ) -> Result<ControlGeneration, LeaseError> {
+        let _gate = self.lease_gate(session).await;
+        self.validate_gated(session, control_token)
+    }
+
+    fn validate_gated(
         &self,
         session: &SessionRef,
         control_token: &str,
@@ -219,8 +278,31 @@ impl LeaseManager {
         Ok(existing.generation)
     }
 
-    pub fn renew(&self, session: &SessionRef, control_token: &str) -> Result<Duration, LeaseError> {
+    /// Begin a lease-held acknowledgement: validate the token under the
+    /// session's lease-operation gate and return a guard that the caller
+    /// must hold until the backend ack commit completes. While the guard
+    /// is held, no release, expiry or takeover can advance or replace the
+    /// lease, so the ack's authorization cannot be invalidated between
+    /// validation and commit.
+    pub async fn begin_ack(
+        &self,
+        session: &SessionRef,
+        control_token: &str,
+    ) -> Result<LeaseAckGuard, LeaseError> {
+        let gate = self.lease_gate(session).await;
+        self.validate_gated(session, control_token)?;
+        Ok(LeaseAckGuard { _gate: gate })
+    }
+
+    /// Renew a held lease. Gated because an expired token's renewal
+    /// invalidates the generation.
+    pub async fn renew(
+        &self,
+        session: &SessionRef,
+        control_token: &str,
+    ) -> Result<Duration, LeaseError> {
         let supplied = SecretToken::parse(control_token).ok_or(LeaseError::Expired)?;
+        let _gate = self.lease_gate(session).await;
         let now = Instant::now();
         let mut leases = self.inner.leases.lock().expect("lease table");
         let Some(existing) = leases.get_mut(session) else {
@@ -238,8 +320,16 @@ impl LeaseManager {
         Ok(self.inner.ttl)
     }
 
-    pub fn release(&self, session: &SessionRef, control_token: &str) -> Result<(), LeaseError> {
+    /// Release a held lease. Gated: the release's generation advance is the
+    /// linearization point clients observe, and it must queue behind any
+    /// ack that already validated.
+    pub async fn release(
+        &self,
+        session: &SessionRef,
+        control_token: &str,
+    ) -> Result<(), LeaseError> {
         let supplied = SecretToken::parse(control_token).ok_or(LeaseError::Expired)?;
+        let _gate = self.lease_gate(session).await;
         let now = Instant::now();
         let mut leases = self.inner.leases.lock().expect("lease table");
         let Some(existing) = leases.get(session) else {
@@ -258,6 +348,10 @@ impl LeaseManager {
     }
 
     fn revoke_unpublished(&self, session: &SessionRef, token: SecretToken) {
+        // Ungated on purpose: this token was never handed to a client, so
+        // no acknowledgement can hold the session's lease-operation gate
+        // against it (a grant only becomes visible in the table after the
+        // gate is released, and a live predecessor makes acquire Busy).
         let mut leases = self.inner.leases.lock().expect("lease table");
         if leases
             .get(session)
@@ -286,6 +380,10 @@ impl LeaseManager {
                     lease.expires_at
                 };
                 tokio::time::sleep_until(deadline).await;
+                // Expiry invalidation is a generation transition: take the
+                // session's lease-operation gate so it cannot pass a
+                // parked ack either.
+                let gate = inner.session_gate(&session).lock_owned().await;
                 let error = {
                     let mut leases = inner.leases.lock().expect("lease table");
                     let Some(lease) = leases.get(&session) else {
@@ -306,6 +404,7 @@ impl LeaseManager {
                         Err(error) => error,
                     }
                 };
+                drop(gate);
                 tracing::error!(
                     session_source = session.source.as_str(),
                     session_id = session.external_id.as_str(),
@@ -323,8 +422,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use qingluan_core::terminal::{
-        ExternalSessionId, LogIdentity, ReadLimits, ReadRequest, ReadResult, SendReceipt,
-        SessionSource, StartSpec, TailView, TerminalRef, TerminalSnapshot,
+        EventPage, ExternalSessionId, LogIdentity, ReadLimits, ReadRequest, ReadResult,
+        SendReceipt, SessionSource, StartSpec, TailView, TerminalRef, TerminalSnapshot,
     };
     use qingluan_terminal::{RuntimeError, SendError};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -375,6 +474,22 @@ mod tests {
                 std::future::pending::<()>().await;
             }
             Ok(SessionEventState::new(0, 0, 0).unwrap())
+        }
+
+        async fn events_after(
+            &self,
+            _session: &SessionRef,
+            _after_event_seq: u64,
+        ) -> Result<EventPage, RuntimeError> {
+            unreachable!()
+        }
+
+        async fn ack_events(
+            &self,
+            _session: &SessionRef,
+            _up_to_seq: u64,
+        ) -> Result<SessionEventState, RuntimeError> {
+            unreachable!()
         }
 
         async fn start(
@@ -451,21 +566,30 @@ mod tests {
         assert_eq!(
             manager
                 .validate(&session, &first.control_token)
+                .await
                 .unwrap()
                 .get(),
             2
         );
 
         tokio::time::advance(Duration::from_secs(20)).await;
-        manager.renew(&session, &first.control_token).unwrap();
+        manager.renew(&session, &first.control_token).await.unwrap();
         tokio::time::advance(Duration::from_secs(20)).await;
         tokio::task::yield_now().await;
-        assert!(manager.validate(&session, &first.control_token).is_ok());
+        assert!(
+            manager
+                .validate(&session, &first.control_token)
+                .await
+                .is_ok()
+        );
 
-        manager.release(&session, &first.control_token).unwrap();
+        manager
+            .release(&session, &first.control_token)
+            .await
+            .unwrap();
         assert_eq!(backend.generation.load(Ordering::SeqCst), 3);
         assert!(matches!(
-            manager.validate(&session, &first.control_token),
+            manager.validate(&session, &first.control_token).await,
             Err(LeaseError::Expired)
         ));
 
@@ -475,7 +599,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
         tokio::task::yield_now().await;
         assert!(matches!(
-            manager.validate(&session, &second.control_token),
+            manager.validate(&session, &second.control_token).await,
             Err(LeaseError::Expired)
         ));
         assert_eq!(backend.generation.load(Ordering::SeqCst), 5);
@@ -523,7 +647,7 @@ mod tests {
         );
 
         for token in ["", "not-a-token", "00000000000000000000000000000000"] {
-            let error = manager.validate(&session, token).unwrap_err();
+            let error = manager.validate(&session, token).await.unwrap_err();
             let rendered = format!("{error:?}");
             assert!(!rendered.contains(token) || token.is_empty());
             assert!(matches!(error, LeaseError::Expired));

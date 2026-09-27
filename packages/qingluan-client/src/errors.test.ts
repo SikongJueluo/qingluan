@@ -243,3 +243,42 @@ describe("richer-status decode", () => {
     assert.equal(decodeErrorDetail(BUSY, [unspecified]), undefined);
   });
 });
+
+// ── S8: EVENT_RANGE_CLEARED decoding ────────────────────────────────────
+
+describe("event_range_cleared", () => {
+  const clearedPayload = {
+    $case: "eventRangeCleared",
+    value: { afterEventSeq: 3n, prunedThroughSeq: 5n, availableAfterSeq: 5n },
+  } as const;
+
+  it("decodes exact bigint recovery bounds", () => {
+    const bytes = carrier(9, [
+      errorDetailAny(ErrorReason.ERROR_REASON_EVENT_RANGE_CLEARED, clearedPayload),
+    ]);
+    const decoded = decodeErrorDetail(9, [bytes]);
+    assert.ok(decoded);
+    const error = toClientError(decoded);
+    assert.deepEqual(error, {
+      kind: "event_range_cleared",
+      afterEventSeq: 3n,
+      prunedThroughSeq: 5n,
+      availableAfterSeq: 5n,
+    });
+  });
+
+  it("degrades to undefined when the reason does not match the payload", () => {
+    const mismatched = carrier(9, [
+      errorDetailAny(ErrorReason.ERROR_REASON_EVENT_RANGE_CLEARED, {
+        $case: "controlBusy",
+        value: { remainingMs: 1n },
+      }),
+    ]);
+    assert.equal(decodeErrorDetail(9, [mismatched]), undefined);
+  });
+
+  it("degrades to undefined when the payload is missing", () => {
+    const missing = carrier(9, [errorDetailAny(ErrorReason.ERROR_REASON_EVENT_RANGE_CLEARED)]);
+    assert.equal(decodeErrorDetail(9, [missing]), undefined);
+  });
+});

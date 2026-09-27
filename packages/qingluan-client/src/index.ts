@@ -33,10 +33,12 @@ export {
   assertUint64,
   formatHistoryPosition,
   formatReadCursor,
+  formatSessionEventState,
   formatUint64,
   parseUint64,
   type HistoryPositionJson,
   type ReadCursorJson,
+  type SessionEventStateJson,
 } from "./ids.js";
 
 export type {
@@ -53,6 +55,10 @@ export type {
   ReadCursor,
   ReadPage,
   ReadPosition,
+  SessionEvent,
+  SessionEventBatch,
+  SessionEventPayload,
+  SessionEventState,
   SessionRef,
   StartSpec,
   TailResult,

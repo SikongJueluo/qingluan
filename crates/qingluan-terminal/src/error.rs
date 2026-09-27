@@ -157,6 +157,28 @@ pub enum RuntimeError {
         /// Human-readable detail.
         detail: String,
     },
+    /// An event replay or subscription named a sequence strictly before the
+    /// session's pruned bound, so the requested range is no longer retained.
+    /// The cleared prefix and the earliest recoverable resumption bound are
+    /// carried whole; recovery is the caller's explicit choice and never a
+    /// silent jump to the newest event.
+    EventRangeCleared {
+        /// The requested exclusive lower bound.
+        after_event_seq: u64,
+        /// Highest already-pruned sequence for this session.
+        pruned_through_seq: u64,
+        /// Earliest safe resumption bound (== `pruned_through_seq`).
+        available_after_seq: u64,
+    },
+    /// A cumulative event ack named a sequence beyond the session's durable
+    /// committed bound: an uncommitted bound may never be acknowledged.
+    /// Nothing was written.
+    EventAckOutOfBounds {
+        /// The refused acknowledgement bound.
+        up_to_seq: u64,
+        /// The committed bound it exceeded.
+        last_committed_seq: u64,
+    },
     /// One or more terminals could not be verifiably cleaned up during
     /// shutdown.
     ShutdownIncomplete {
@@ -209,6 +231,22 @@ impl fmt::Display for RuntimeError {
             }
             RuntimeError::InvalidQuery { detail } => write!(f, "invalid query: {detail}"),
             RuntimeError::Io { detail } => write!(f, "io error: {detail}"),
+            RuntimeError::EventRangeCleared {
+                after_event_seq,
+                pruned_through_seq,
+                available_after_seq,
+            } => write!(
+                f,
+                "event range cleared: after_event_seq {after_event_seq} precedes pruned bound \
+                 {pruned_through_seq}; resume after {available_after_seq}"
+            ),
+            RuntimeError::EventAckOutOfBounds {
+                up_to_seq,
+                last_committed_seq,
+            } => write!(
+                f,
+                "event ack {up_to_seq} exceeds committed event bound {last_committed_seq}"
+            ),
             RuntimeError::ShutdownIncomplete { detail } => {
                 write!(f, "shutdown incomplete: {detail}")
             }
@@ -245,6 +283,21 @@ pub(crate) fn storage_error(error: qingluan_storage::StorageError) -> RuntimeErr
         }
         qingluan_storage::StorageError::Query(QueryError::Invalid { detail }) => {
             RuntimeError::InvalidQuery { detail }
+        }
+        qingluan_storage::StorageError::EventRangeCleared {
+            after,
+            pruned_through_seq,
+            available_after_seq,
+        } => RuntimeError::EventRangeCleared {
+            after_event_seq: after,
+            pruned_through_seq,
+            available_after_seq,
+        },
+        qingluan_storage::StorageError::EventAckOutOfBounds { acked, committed } => {
+            RuntimeError::EventAckOutOfBounds {
+                up_to_seq: acked,
+                last_committed_seq: committed,
+            }
         }
         other => RuntimeError::Storage {
             detail: other.to_string(),

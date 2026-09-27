@@ -1,6 +1,8 @@
 //! Transport seam: the client speaks to exactly this interface, so unit
 //! tests can inject a scripted transport and production uses grpc-js over
-//! the daemon's Unix-domain socket.
+//! the daemon's Unix-domain socket. Server streaming is a deliberately
+//! separate seam: a follow stream has no result-unknown semantics and no
+//! fixed deadline, so it must not ride the unary invoke path.
 
 /** gRPC status codes the client reasons about (subset of grpc.status). */
 export const grpcStatus = {
@@ -13,7 +15,7 @@ export const grpcStatus = {
   dataLoss: 15,
 } as const;
 
-/** The nine unary RPCs of the S6 protocol surface. */
+/** The unary RPCs of the S6/S8 protocol surface. */
 export type TerminalMethod =
   | "getServerInfo"
   | "acquireControl"
@@ -23,7 +25,11 @@ export type TerminalMethod =
   | "send"
   | "stop"
   | "read"
-  | "tail";
+  | "tail"
+  | "ackSessionEvents";
+
+/** The server-streaming RPCs of the S8 protocol surface. */
+export type StreamingTerminalMethod = "watchSessionEvents";
 
 export interface InvokeOptions {
   /** Absolute deadline in `Date.now()` milliseconds. */
@@ -35,6 +41,31 @@ export interface InvokeOptions {
 export interface InvokeHandle {
   promise: Promise<unknown>;
   /** Requests cancellation; the promise rejects with a CANCELLED failure. */
+  cancel(): void;
+}
+
+/**
+ * Options for one server-streaming call. A follow stream is long-lived, so
+ * the deadline is optional (absent means no per-call deadline); consumers
+ * that want bounded watch duration pass one explicitly and receive a
+ * terminal deadline failure instead of a silent reconnect.
+ */
+export interface StreamOptions {
+  /** Optional absolute deadline in `Date.now()` milliseconds. */
+  deadline?: number;
+  /** Ends the stream (closing the call) when aborted. */
+  signal?: AbortSignal;
+}
+
+/**
+ * One open server-stream. `batches` yields decoded response messages until
+ * the server ends the stream or the transport fails; the iteration throws
+ * a {@link TransportFailure} on a failed stream. `cancel` closes the
+ * underlying call; an in-progress (or subsequent) iteration then ends or
+ * fails promptly and no further messages are delivered.
+ */
+export interface StreamHandle {
+  batches: AsyncIterable<unknown>;
   cancel(): void;
 }
 
@@ -67,3 +98,20 @@ export interface UnaryTransport {
   /** Close the channel and release resources. */
   close(): void;
 }
+
+/**
+ * Server-streaming RPC transport. `watch` opens one stream; message decode
+ * failures and stream-level failures reject the iteration with a
+ * {@link TransportFailure}.
+ */
+export interface StreamingTransport {
+  /** Open one server-streaming RPC. */
+  watch(
+    method: StreamingTerminalMethod,
+    request: unknown,
+    options: StreamOptions,
+  ): StreamHandle;
+}
+
+/** The full transport the production client requires. */
+export interface TerminalTransport extends UnaryTransport, StreamingTransport {}

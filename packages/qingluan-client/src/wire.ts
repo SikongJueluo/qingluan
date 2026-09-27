@@ -8,6 +8,8 @@
 import { assertUint64 } from "./ids.js";
 import {
   ReadTruncation,
+  type AckSessionEventsRequest as PbAckSessionEventsRequest,
+  type AckSessionEventsResponse as PbAckSessionEventsResponse,
   type EnvironmentSnapshot as PbEnvironmentSnapshot,
   type HistoryPosition as PbHistoryPosition,
   type HistoryRange as PbHistoryRange,
@@ -17,12 +19,15 @@ import {
   type ReadRequest as PbReadRequest,
   type ReadResponse as PbReadResponse,
   type SendRequest,
+  type SessionEvent as PbSessionEvent,
   type StartRequest,
   type StopResponse,
   type TailResponse,
   type TerminalRef as PbTerminalRef,
   type TerminalSize as PbTerminalSize,
   type TerminalSnapshot as PbTerminalSnapshot,
+  type WatchSessionEventsRequest as PbWatchSessionEventsRequest,
+  type WatchSessionEventsResponse as PbWatchSessionEventsResponse,
 } from "./generated/qingluan/terminal/v1/terminal.js";
 
 // ── Public value types ─────────────────────────────────────────────────
@@ -144,6 +149,37 @@ export type ReadPosition =
 export interface QueryLimits {
   maxLines?: number;
   maxBytes?: number;
+}
+
+/** Watermark snapshot of one session's persistent event stream. */
+export interface SessionEventState {
+  ackedThroughSeq: bigint;
+  lastCommittedSeq: bigint;
+  prunedThroughSeq: bigint;
+}
+
+/** Lifecycle event payloads (the protocol's pending set may grow). */
+export type SessionEventPayload =
+  | { kind: "process_exited"; result: ExitResult }
+  | { kind: "output_closed"; end: OutputEnd };
+
+/** One persistent session lifecycle event; self-explanatory on replay. */
+export interface SessionEvent {
+  session: SessionRef;
+  eventSeq: bigint;
+  terminalId: string;
+  payload: SessionEventPayload;
+}
+
+/**
+ * One bounded watch batch: ordered events continuing from the explicit
+ * subscription position plus a consistent watermark snapshot. An empty
+ * batch only establishes the watermark; the next position is always the
+ * last yielded event's `eventSeq` — there is no separate cursor.
+ */
+export interface SessionEventBatch {
+  state: SessionEventState;
+  events: SessionEvent[];
 }
 
 // ── Public → protobuf ──────────────────────────────────────────────────
@@ -284,6 +320,113 @@ function checkUint32(field: string, value: number | undefined): void {
 }
 
 // ── Protobuf → public ──────────────────────────────────────────────────
+
+function toControlContext(control: {
+  session: SessionRef;
+  controlToken: string;
+}): { session: { source: string; externalId: string }; controlToken: string } {
+  return {
+    session: toSession(control.session),
+    controlToken: control.controlToken,
+  };
+}
+
+export function toWatchSessionEventsRequest(
+  session: SessionRef,
+  afterEventSeq: bigint,
+): PbWatchSessionEventsRequest {
+  assertUint64("afterEventSeq", afterEventSeq);
+  return { session: toSession(session), afterEventSeq };
+}
+
+export function toAckSessionEventsRequest(
+  control: { session: SessionRef; controlToken: string },
+  upToSeq: bigint,
+): PbAckSessionEventsRequest {
+  assertUint64("upToSeq", upToSeq);
+  return { control: toControlContext(control), upToSeq };
+}
+
+export function fromSessionEventState(
+  value: PbWatchSessionEventsResponse["state"],
+): SessionEventState {
+  if (value === undefined) {
+    throw new Error("server response is missing the session event state");
+  }
+  return {
+    ackedThroughSeq: value.ackedThroughSeq,
+    lastCommittedSeq: value.lastCommittedSeq,
+    prunedThroughSeq: value.prunedThroughSeq,
+  };
+}
+
+export function fromSessionEvent(event: PbSessionEvent): SessionEvent {
+  if (event.session === undefined) {
+    throw new Error("session event is missing its session reference");
+  }
+  // Fail closed: an event whose payload is missing or unrecognized is
+  // never surfaced as a decodable event — the watch iteration throws so
+  // the consumer cannot acknowledge an event it could not interpret.
+  const payload = event.payload;
+  let decoded: SessionEventPayload;
+  if (payload?.$case === "processExited") {
+    const result = payload.value.result;
+    if (result === undefined) {
+      throw new Error("process-exited event is missing its exit result");
+    }
+    decoded =
+      result.$case === "exitCode"
+        ? { kind: "process_exited", result: { exitCode: result.value } }
+        : { kind: "process_exited", result: { signal: result.value } };
+  } else if (payload?.$case === "outputClosed") {
+    const end = payload.value.end;
+    if (end === undefined) {
+      throw new Error("output-closed event is missing its output end");
+    }
+    switch (end.$case) {
+      case "eof":
+        decoded = { kind: "output_closed", end: "eof" };
+        break;
+      case "forcedClose":
+        decoded = { kind: "output_closed", end: "forced_close" };
+        break;
+      case "readError":
+        decoded = { kind: "output_closed", end: "read_error" };
+        break;
+      case "interrupted":
+        decoded = { kind: "output_closed", end: "interrupted" };
+        break;
+      default:
+        throw new Error("output-closed event has an unrecognized output end");
+    }
+  } else {
+    throw new Error("session event payload is missing or unrecognized");
+  }
+  return {
+    session: {
+      source: event.session.source,
+      externalId: event.session.externalId,
+    },
+    eventSeq: event.eventSeq,
+    terminalId: event.terminalId,
+    payload: decoded,
+  };
+}
+
+export function fromWatchSessionEventsResponse(
+  response: PbWatchSessionEventsResponse,
+): SessionEventBatch {
+  return {
+    state: fromSessionEventState(response.state),
+    events: response.events.map((event: PbSessionEvent) => fromSessionEvent(event)),
+  };
+}
+
+export function fromAckSessionEventsResponse(
+  response: PbAckSessionEventsResponse,
+): SessionEventState {
+  return fromSessionEventState(response.state);
+}
 
 export function fromTerminal(terminal: PbTerminalRef | undefined): TerminalRef {
   if (terminal === undefined || terminal.session === undefined) {

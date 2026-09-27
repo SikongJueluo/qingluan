@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# S7 end-to-end gate for packages/qingluan-client against the test-only
+# S7/S8 end-to-end gate for packages/qingluan-client against the test-only
 # daemon fixture: lease lifecycle and competition, auto-renewal, lease
 # expiry, typed partial writes, read cursors, tail, deadline/cancellation,
-# and a daemon death mid-send (unknown result → reconnect → re-acquire).
+# a daemon death mid-send (unknown result → reconnect → re-acquire), and
+# the S8 event surface (ordered replay, lease-gated cumulative ack,
+# disconnect/reconnect continuation, cleared-history recovery bounds,
+# bigint exactness).
 set -euo pipefail
 
 PKG=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

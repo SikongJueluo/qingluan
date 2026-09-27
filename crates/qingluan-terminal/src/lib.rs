@@ -2,9 +2,10 @@
 //!
 //! This crate is the single external seam for agent terminal lifecycle and
 //! observation. [`TerminalRuntime`] exposes open/start/send/resize/stop/
-//! snapshot/list/advance_control_generation/shutdown, plus the S4 query
-//! surface (log_identity/read/grep/tail/resolve_tail_position), with
-//! signatures in [`qingluan_core::terminal`] domain types only.
+//! snapshot/list/advance_control_generation/shutdown, the S4 query surface
+//! (log_identity/read/grep/tail/resolve_tail_position), and the S5 durable
+//! event seam (events_after/ack_events as a core-domain [`EventPage`]),
+//! with signatures in [`qingluan_core::terminal`] domain types only.
 //!
 //! Everything behind the seam stays private: the PTY master fd with its
 //! self-managed `AsyncFd` write path, the per-terminal cgroup v2 cleanup
@@ -93,4 +94,5 @@ mod write;
 
 pub use config::RuntimeConfig;
 pub use error::{QuotaScope, RuntimeError, SendError, SendRejection};
+pub use qingluan_core::terminal::EventPage;
 pub use runtime::TerminalRuntime;

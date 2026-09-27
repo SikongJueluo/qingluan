@@ -1,16 +1,37 @@
 //! Tonic `TerminalService` adapter.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use qingluan_core::terminal as domain;
 use qingluan_protocol::terminal::v1 as pb;
 use qingluan_protocol::terminal::v1::terminal_service_server::TerminalService;
 use qingluan_terminal::RuntimeError;
+use tokio::sync::mpsc;
+use tokio_stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::backend::TerminalBackend;
 use crate::lease::LeaseManager;
 use crate::wire;
+
+/// How long the event follow loop idles between polls of the durable store
+/// when no new events are committed. Polling the durable store while idle is
+/// the accepted follow mechanism (there is no second event state machine and
+/// nothing is published before commit), so the interval only bounds latency
+/// and idle work; it is deliberately small, fixed, and independent of the
+/// client so a slow consumer cannot increase server-side polling.
+const EVENT_FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Bounded buffering between the follow loop and the gRPC stream: the loop
+/// blocks on a full buffer (backpressure) instead of growing without bound,
+/// and a consumer that stops draining still leaves the loop cancellable
+/// through the channel's send failure.
+const EVENT_STREAM_BUFFER: usize = 8;
+
+type EventStream =
+    Pin<Box<dyn Stream<Item = Result<pb::WatchSessionEventsResponse, Status>> + Send>>;
 
 #[derive(Clone)]
 pub struct TerminalGrpcService {
@@ -18,7 +39,6 @@ pub struct TerminalGrpcService {
     leases: LeaseManager,
     daemon_version: String,
 }
-
 impl TerminalGrpcService {
     pub fn new(
         backend: Arc<dyn TerminalBackend>,
@@ -35,6 +55,8 @@ impl TerminalGrpcService {
 
 #[tonic::async_trait]
 impl TerminalService for TerminalGrpcService {
+    type WatchSessionEventsStream = EventStream;
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,
@@ -50,6 +72,7 @@ impl TerminalService for TerminalGrpcService {
                 "terminal.stop.v1".into(),
                 "terminal.read.v1".into(),
                 "terminal.tail.v1".into(),
+                "terminal.events.v1".into(),
                 "rich-error.google.rpc.status.v1".into(),
             ],
         }))
@@ -80,6 +103,7 @@ impl TerminalService for TerminalGrpcService {
         let expires_in = self
             .leases
             .renew(&session, &token)
+            .await
             .map_err(wire::lease_status)?;
         Ok(Response::new(pb::RenewControlResponse {
             expires_in_ms: wire::duration_ms(expires_in),
@@ -93,6 +117,7 @@ impl TerminalService for TerminalGrpcService {
         let (session, token) = wire::control(request.into_inner().control)?;
         self.leases
             .release(&session, &token)
+            .await
             .map_err(wire::lease_status)?;
         Ok(Response::new(pb::ReleaseControlResponse {}))
     }
@@ -109,6 +134,7 @@ impl TerminalService for TerminalGrpcService {
         let generation = self
             .leases
             .validate(&session, &token)
+            .await
             .map_err(wire::lease_status)?;
         let terminal = self
             .backend
@@ -129,6 +155,7 @@ impl TerminalService for TerminalGrpcService {
         let generation = self
             .leases
             .validate(&session, &token)
+            .await
             .map_err(wire::lease_status)?;
         let terminal = wire::terminal_for_session(session, request.terminal_id)?;
         if request.data.len() > wire::MAX_SEND_BYTES {
@@ -153,6 +180,7 @@ impl TerminalService for TerminalGrpcService {
         let generation = self
             .leases
             .validate(&session, &token)
+            .await
             .map_err(wire::lease_status)?;
         let terminal = wire::terminal_for_session(session, request.terminal_id)?;
         let snapshot = self
@@ -224,5 +252,117 @@ impl TerminalService for TerminalGrpcService {
             .await
             .map_err(wire::tail_status)?;
         Ok(Response::new(wire::tail_response(&result)?))
+    }
+
+    /// Server-streaming follow of a session's committed lifecycle events.
+    ///
+    /// Lease-free by design: watching is observation and never confirms
+    /// consumption. The stream is a bounded, cancellation-safe follow loop
+    /// over ordered durable pages — each batch continues explicitly from the
+    /// last emitted `event_seq`, an empty batch only establishes the current
+    /// watermark (initially, or when the watermarks moved while idle), and
+    /// any backend failure (including a cleared replay range) terminates the
+    /// stream explicitly with that status instead of being retried or
+    /// skipped. Cancelling the RPC drops the receiver; the loop observes the
+    /// closed channel on every send and, while caught up, races the idle
+    /// poll sleep against channel closure, so a dropped stream stops
+    /// following promptly instead of polling the store forever.
+    async fn watch_session_events(
+        &self,
+        request: Request<pb::WatchSessionEventsRequest>,
+    ) -> Result<Response<Self::WatchSessionEventsStream>, Status> {
+        let request = request.into_inner();
+        let session = wire::session(request.session)?;
+        let mut after_event_seq = request.after_event_seq;
+        let backend = Arc::clone(&self.backend);
+
+        let (tx, rx) =
+            mpsc::channel::<Result<pb::WatchSessionEventsResponse, Status>>(EVENT_STREAM_BUFFER);
+        tokio::spawn(async move {
+            // Watermark of the last emitted batch: an idle poll re-emits an
+            // empty batch only when the watermarks actually moved (the
+            // initial emission always establishes the watermark).
+            let mut sent_state: Option<domain::SessionEventState> = None;
+            loop {
+                if tx.is_closed() {
+                    // The receiver is gone: stop before touching the store
+                    // again, so cancellation cannot leak polling work.
+                    return;
+                }
+                let page = match backend.events_after(&session, after_event_seq).await {
+                    Ok(page) => page,
+                    Err(error) => {
+                        // Storage degradation and a cleared range both end
+                        // the stream with the typed status; the client decides
+                        // whether and where to resubscribe.
+                        let _ = tx.send(Err(wire::runtime_status(error))).await;
+                        return;
+                    }
+                };
+                let more_pages = page.next_after_seq.is_some();
+                if let Some(event) = page.events.last() {
+                    after_event_seq = event.event_seq.get();
+                }
+                let watermark_moved = sent_state != Some(page.state);
+                if !page.events.is_empty() || watermark_moved {
+                    let batch = match wire::watch_response(&page) {
+                        Ok(batch) => batch,
+                        Err(status) => {
+                            // An unrepresentable payload is never published:
+                            // fail closed instead of emitting an event a
+                            // client could acknowledge blindly.
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
+                    };
+                    sent_state = Some(page.state);
+                    if tx.send(Ok(batch)).await.is_err() {
+                        // Receiver dropped (client cancelled or disconnected):
+                        // stop following; nothing is left to clean up.
+                        return;
+                    }
+                }
+                if !more_pages {
+                    // Caught up: idle-poll the durable store on a bounded
+                    // interval, but never sleep past a cancelled stream —
+                    // the wait resolves as soon as the receiver drops
+                    // instead of polling the store forever. A full page
+                    // continues immediately.
+                    tokio::select! {
+                        _ = tx.closed() => return,
+                        _ = tokio::time::sleep(EVENT_FOLLOW_POLL_INTERVAL) => {}
+                    }
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+
+    /// Cumulative acknowledgement of a session's events. Requires a valid
+    /// control lease (only the controlling client may acknowledge); a bound
+    /// beyond the committed bound is refused with nothing written. The ack
+    /// is linearized against lease generation transitions: the lease gate is
+    /// held from validation through the backend commit, so a concurrent
+    /// release, expiry or takeover cannot invalidate the ack in between.
+    async fn ack_session_events(
+        &self,
+        request: Request<pb::AckSessionEventsRequest>,
+    ) -> Result<Response<pb::AckSessionEventsResponse>, Status> {
+        let request = request.into_inner();
+        let (session, token) = wire::control(request.control)?;
+        let lease = self
+            .leases
+            .begin_ack(&session, &token)
+            .await
+            .map_err(wire::lease_status)?;
+        let state = self
+            .backend
+            .ack_events(&session, request.up_to_seq)
+            .await
+            .map_err(wire::runtime_status)?;
+        drop(lease);
+        Ok(Response::new(pb::AckSessionEventsResponse {
+            state: Some(wire::event_state(state)),
+        }))
     }
 }

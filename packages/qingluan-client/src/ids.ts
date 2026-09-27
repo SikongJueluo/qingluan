@@ -2,7 +2,7 @@
 //! enter tool/JSON output as decimal strings — never as JS numbers, which
 //! cannot represent every uint64 exactly.
 
-import type { HistoryPosition, ReadCursor, TerminalRef } from "./wire.js";
+import type { HistoryPosition, ReadCursor, SessionEventState, TerminalRef } from "./wire.js";
 
 /** Largest uint64 value (`2^64 - 1`). */
 export const MAX_UINT64 = 18_446_744_073_709_551_615n;
@@ -65,5 +65,21 @@ export function formatReadCursor(cursor: ReadCursor): ReadCursorJson {
     },
     next: formatHistoryPosition(cursor.next),
     endLine: formatUint64(cursor.endLine),
+  };
+}
+
+/** A {@link SessionEventState} with decimal-string fields, for tool JSON. */
+export interface SessionEventStateJson {
+  ackedThroughSeq: string;
+  lastCommittedSeq: string;
+  prunedThroughSeq: string;
+}
+
+/** Decimal-string form of a session event watermark snapshot. */
+export function formatSessionEventState(state: SessionEventState): SessionEventStateJson {
+  return {
+    ackedThroughSeq: formatUint64(state.ackedThroughSeq),
+    lastCommittedSeq: formatUint64(state.lastCommittedSeq),
+    prunedThroughSeq: formatUint64(state.prunedThroughSeq),
   };
 }

@@ -13,6 +13,9 @@ const FAILED_PRECONDITION = 9;
 const UNAVAILABLE = 14;
 const DEADLINE_EXCEEDED = 4;
 const CANCELLED = 1;
+const UNKNOWN = 2;
+const INTERNAL = 13;
+const DATA_LOSS = 15;
 
 const session = { source: "pi", externalId: "session-1" };
 const terminalRef = { session, terminalId: "t1" };
@@ -840,3 +843,238 @@ function pbFragment(line: bigint, text: string) {
     suffixRemaining: false,
   };
 }
+
+// ── S8: watchSessionEvents / ackSessionEvents ───────────────────────────
+
+function eventBatch(
+  seqs: Array<bigint>,
+  state: { ackedThroughSeq: bigint; lastCommittedSeq: bigint; prunedThroughSeq: bigint },
+) {
+  return {
+    state,
+    events: seqs.map((seq) => ({
+      session,
+      eventSeq: seq,
+      terminalId: "t1",
+      payload:
+        seq % 2n === 0n
+          ? { $case: "outputClosed", value: { end: { $case: "eof", value: {} } } }
+          : {
+              $case: "processExited",
+              value: { result: { $case: "exitCode", value: Number(seq % 128n) } },
+            },
+    })),
+  };
+}
+
+function clearedFailure(): TransportFailure {
+  return new TransportFailure(FAILED_PRECONDITION, "requested event range was already cleared", [
+    carrier(FAILED_PRECONDITION, [
+      errorDetailAny(ErrorReason.ERROR_REASON_EVENT_RANGE_CLEARED, {
+        $case: "eventRangeCleared",
+        value: { afterEventSeq: 3n, prunedThroughSeq: 5n, availableAfterSeq: 5n },
+      }),
+    ]),
+  ]);
+}
+
+describe("watchSessionEvents", () => {
+  it("replays ordered batches, reconnects from the last fully yielded position, and never auto-acks", async () => {
+    const transport = new MockTransport();
+    const client = new TerminalClient({ socketPath: "unused", transport });
+    transport.respond(serverInfoResponse());
+    await client.connect();
+
+    transport.pushStreamBatch(eventBatch([1n, 2n], { ackedThroughSeq: 0n, lastCommittedSeq: 2n, prunedThroughSeq: 0n }));
+    transport.pushStreamFailure(new TransportFailure(UNAVAILABLE, "connection reset"));
+    // The reconnect loop rechecks the protocol major after connect().
+    transport.respond(serverInfoResponse());
+    transport.pushStreamBatch(eventBatch([3n], { ackedThroughSeq: 0n, lastCommittedSeq: 3n, prunedThroughSeq: 0n }));
+
+    const batches = [];
+    for await (const batch of client.watchSessionEvents(session, 0n)) {
+      batches.push(batch);
+      if (batches.length === 2) {
+        break;
+      }
+    }
+
+    assert.equal(batches.length, 2);
+    assert.deepEqual(
+      batches[0].events.map((event) => event.eventSeq),
+      [1n, 2n],
+    );
+    assert.equal(batches[0].events[0].payload.kind, "process_exited");
+    assert.deepEqual(batches[0].events[0].payload.result, { exitCode: 1 });
+    assert.equal(batches[0].events[1].payload.kind, "output_closed");
+    assert.equal(batches[0].events[1].payload.end, "eof");
+    assert.equal(batches[1].state.lastCommittedSeq, 3n);
+
+    // The resubscription continued from the last fully yielded event, and
+    // watching never issued an acknowledgement.
+    assert.equal(transport.streamCalls.length, 2);
+    const firstRequest = transport.streamCalls[0].request as { afterEventSeq: bigint };
+    const secondRequest = transport.streamCalls[1].request as { afterEventSeq: bigint };
+    assert.equal(firstRequest.afterEventSeq, 0n);
+    assert.equal(secondRequest.afterEventSeq, 2n);
+    assert.ok(!transport.calls.some((call) => call.method === "ackSessionEvents"));
+    client.close();
+  });
+
+  it("surfaces typed cleared-history bounds without retrying or skipping", async () => {
+    const transport = new MockTransport();
+    const client = new TerminalClient({ socketPath: "unused", transport });
+    transport.respond(serverInfoResponse());
+    await client.connect();
+    transport.pushStreamFailure(clearedFailure());
+
+    let caught: unknown;
+    try {
+      for await (const _batch of client.watchSessionEvents(session, 3n)) {
+        assert.fail("cleared history must terminate the watch");
+      }
+    } catch (error) {
+      caught = error;
+    }
+    const cleared = caught as { kind?: string; afterEventSeq?: bigint };
+    assert.equal(cleared.kind, "event_range_cleared");
+    assert.equal(cleared.afterEventSeq, 3n);
+    assert.equal((cleared as { prunedThroughSeq?: bigint }).prunedThroughSeq, 5n);
+    assert.equal((cleared as { availableAfterSeq?: bigint }).availableAfterSeq, 5n);
+    // A terminal failure is never retried.
+    assert.equal(transport.streamCalls.length, 1);
+    client.close();
+  });
+
+  it("surfaces non-reconnectable stream statuses terminally instead of resubscribing", async () => {
+    // Only transport loss (`unavailable`, covered above) and clean EOS may
+    // reconnect: server/storage failures and cancellations must not be
+    // hidden behind a blind resubscription.
+    for (const code of [INTERNAL, DATA_LOSS, UNKNOWN, CANCELLED]) {
+      const transport = new MockTransport();
+      const client = connectedClient(transport);
+      await client.connect();
+      transport.pushStreamFailure(new TransportFailure(code, "stream failed"));
+
+      let caught: unknown;
+      try {
+        for await (const _batch of client.watchSessionEvents(session, 0n)) {
+          assert.fail("a non-reconnectable status must terminate the watch");
+        }
+      } catch (error) {
+        caught = error;
+      }
+      const failure = caught as { kind?: string; code?: number };
+      assert.equal(failure.kind, "generic");
+      assert.equal(failure.code, code);
+      // Terminal: exactly one stream call, no resubscription.
+      assert.equal(transport.streamCalls.length, 1);
+      client.close();
+    }
+  });
+
+  it("fails closed on an event with a missing payload", async () => {
+    const transport = new MockTransport();
+    const client = new TerminalClient({ socketPath: "unused", transport });
+    transport.respond(serverInfoResponse());
+    await client.connect();
+    transport.pushStreamBatch({
+      state: { ackedThroughSeq: 0n, lastCommittedSeq: 1n, prunedThroughSeq: 0n },
+      events: [{ session, eventSeq: 1n, terminalId: "t1", payload: undefined }],
+    });
+
+    let caught: unknown;
+    try {
+      for await (const _batch of client.watchSessionEvents(session, 0n)) {
+        assert.fail("a malformed event must not be yielded");
+      }
+    } catch (error) {
+      caught = error;
+    }
+    assert.match(String(caught), /payload/);
+    client.close();
+  });
+
+  it("ends the call when the abort signal fires", async () => {
+    const transport = new MockTransport();
+    const client = new TerminalClient({ socketPath: "unused", transport });
+    transport.respond(serverInfoResponse());
+    await client.connect();
+    const controller = new AbortController();
+    const watch = client.watchSessionEvents(session, 0n, { signal: controller.signal });
+    const first = watch.next();
+    await flush();
+    controller.abort();
+    let caught: unknown;
+    try {
+      await first;
+    } catch (error) {
+      caught = error;
+    }
+    // Cancellation closes the call and surfaces a terminal CANCELLED
+    // failure — it is never treated as a reconnect trigger.
+    const failure = caught as { kind?: string; code?: number };
+    assert.equal(failure.kind, "generic");
+    assert.equal(failure.code, CANCELLED);
+    assert.equal(transport.streamCalls.length, 1);
+    client.close();
+  });
+});
+
+describe("ackSessionEvents", () => {
+  it("returns the resulting watermarks for a held lease", async () => {
+    const transport = new MockTransport();
+    const client = new TerminalClient({ socketPath: "unused", transport, renewIntervalMs: 0 });
+    transport.respond(serverInfoResponse());
+    await client.connect();
+    transport.respond(acquireResponse());
+    const lease = await client.acquireControl(session);
+    transport.respond({
+      state: { ackedThroughSeq: 2n, lastCommittedSeq: 3n, prunedThroughSeq: 0n },
+    });
+    const outcome = await client.ackSessionEvents(lease, 2n);
+    assert.equal(outcome.status, "ok");
+    assert.deepEqual(outcome.value, {
+      ackedThroughSeq: 2n,
+      lastCommittedSeq: 3n,
+      prunedThroughSeq: 0n,
+    });
+    const ack = transport.calls.find((call) => call.method === "ackSessionEvents");
+    assert.equal((ack?.request as { upToSeq?: bigint } | undefined)?.upToSeq, 2n);
+    client.close();
+  });
+
+  it("reports a definite failure for an out-of-bounds bound and never marks the lease uncertain", async () => {
+    const transport = new MockTransport();
+    const client = new TerminalClient({ socketPath: "unused", transport, renewIntervalMs: 0 });
+    transport.respond(serverInfoResponse());
+    await client.connect();
+    transport.respond(acquireResponse());
+    const lease = await client.acquireControl(session);
+    transport.fail(new TransportFailure(INVALID_ARGUMENT, "event ack exceeds the committed event bound"));
+    const outcome = await client.ackSessionEvents(lease, 9n);
+    assert.equal(outcome.status, "failed");
+    assert.equal(outcome.error.kind, "generic");
+    if (outcome.status === "failed" && outcome.error.kind === "generic") {
+      assert.equal(outcome.error.code, INVALID_ARGUMENT);
+    }
+    assert.equal(lease.state, "held");
+    client.close();
+  });
+
+  it("treats an ambiguous transport completion as unknown and marks the lease uncertain", async () => {
+    const transport = new MockTransport();
+    const client = new TerminalClient({ socketPath: "unused", transport, renewIntervalMs: 0 });
+    transport.respond(serverInfoResponse());
+    await client.connect();
+    transport.respond(acquireResponse());
+    const lease = await client.acquireControl(session);
+    transport.fail(new TransportFailure(UNAVAILABLE, "connection reset"));
+    // The reconnect loop rechecks the protocol major after connect().
+    transport.respond(serverInfoResponse());
+    const outcome = await client.ackSessionEvents(lease, 2n);
+    assert.equal(outcome.status, "unknown");
+    assert.equal(lease.state, "uncertain");
+    client.close();
+  });
+});

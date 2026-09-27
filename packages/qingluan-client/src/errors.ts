@@ -34,6 +34,7 @@ const PAYLOAD_CASE_BY_REASON: Record<number, string> = {
   [ErrorReason.ERROR_REASON_TERMINAL_NOT_WRITABLE]: "terminalNotWritable",
   [ErrorReason.ERROR_REASON_PARTIAL_WRITE]: "partialWrite",
   [ErrorReason.ERROR_REASON_RESOURCE_EXHAUSTED]: "resourceExhausted",
+  [ErrorReason.ERROR_REASON_EVENT_RANGE_CLEARED]: "eventRangeCleared",
 };
 
 /** A richer status that passed every structural check. */
@@ -75,6 +76,15 @@ export type ClientError =
   | { kind: "terminal_not_writable"; terminal: TerminalRef; snapshot: TerminalSnapshot | null }
   | { kind: "partial_write"; writtenBytes: bigint | null; abort: WriteAbortReason | null }
   | { kind: "resource_exhausted"; resourceKind: ResourceKindName }
+  | {
+      /** The requested event replay range was already pruned; recovery
+       * bounds are exact bigint bounds and resubscription is the caller's
+       * explicit choice (never an automatic skip to newest). */
+      kind: "event_range_cleared";
+      afterEventSeq: bigint;
+      prunedThroughSeq: bigint;
+      availableAfterSeq: bigint;
+    }
   | {
       kind: "generic";
       /** The outer gRPC status code, preserved through degradation. */
@@ -179,6 +189,16 @@ export function toClientError(decoded: DecodedStatus): ClientError {
     case ErrorReason.ERROR_REASON_RESOURCE_EXHAUSTED:
       if (payload?.$case === "resourceExhausted") {
         return { kind: "resource_exhausted", resourceKind: resourceKindName(payload.value.kind) };
+      }
+      break;
+    case ErrorReason.ERROR_REASON_EVENT_RANGE_CLEARED:
+      if (payload?.$case === "eventRangeCleared") {
+        return {
+          kind: "event_range_cleared",
+          afterEventSeq: payload.value.afterEventSeq,
+          prunedThroughSeq: payload.value.prunedThroughSeq,
+          availableAfterSeq: payload.value.availableAfterSeq,
+        };
       }
       break;
     default:

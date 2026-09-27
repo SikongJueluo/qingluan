@@ -207,6 +207,75 @@ pub fn event_state(value: domain::SessionEventState) -> pb::SessionEventState {
     }
 }
 
+/// Convert one domain lifecycle event into its wire shape.
+///
+/// Fail-closed: a payload this build cannot represent (a future
+/// `#[non_exhaustive]` variant) is an error, never an event with a missing
+/// payload — an unrepresentable event must not be published to a stream a
+/// client could then acknowledge.
+pub fn session_event(event: &domain::SessionEvent) -> Result<pb::SessionEvent, Status> {
+    let payload = match event.payload {
+        domain::SessionEventPayload::ProcessExited(result) => {
+            let result = match result {
+                domain::ExitResult::ExitCode(code) => pb::exit_result::Result::ExitCode(code),
+                domain::ExitResult::Signal(signal) => pb::exit_result::Result::Signal(signal),
+                _ => {
+                    return Err(Status::internal(
+                        "unsupported process exit result in session event",
+                    ));
+                }
+            };
+            pb::session_event::Payload::ProcessExited(pb::ExitResult {
+                result: Some(result),
+            })
+        }
+        domain::SessionEventPayload::OutputClosed(end) => {
+            let end = match end {
+                domain::OutputEnd::Eof => pb::output_end::End::Eof(pb::OutputEof {}),
+                domain::OutputEnd::ForcedClose => {
+                    pb::output_end::End::ForcedClose(pb::OutputForcedClose {})
+                }
+                domain::OutputEnd::ReadError => {
+                    pb::output_end::End::ReadError(pb::OutputReadError {})
+                }
+                domain::OutputEnd::Interrupted => {
+                    pb::output_end::End::Interrupted(pb::OutputInterrupted {})
+                }
+                _ => return Err(Status::internal("unsupported output end in session event")),
+            };
+            pb::session_event::Payload::OutputClosed(pb::OutputEnd { end: Some(end) })
+        }
+        _ => {
+            return Err(Status::internal(
+                "unsupported session event payload for this protocol version",
+            ));
+        }
+    };
+    Ok(pb::SessionEvent {
+        session: Some(pb::SessionRef {
+            source: event.terminal.session.source.as_str().to_owned(),
+            external_id: event.terminal.session.external_id.as_str().to_owned(),
+        }),
+        event_seq: event.event_seq.get(),
+        terminal_id: event.terminal.terminal_id.as_str().to_owned(),
+        payload: Some(payload),
+    })
+}
+
+/// Convert one domain event page into a watch batch. The batch is empty
+/// exactly when the page carried no events (the initial watermark shape);
+/// page ordering is preserved as-is.
+pub fn watch_response(page: &domain::EventPage) -> Result<pb::WatchSessionEventsResponse, Status> {
+    Ok(pb::WatchSessionEventsResponse {
+        state: Some(event_state(page.state)),
+        events: page
+            .events
+            .iter()
+            .map(session_event)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
 pub fn terminal_ref(value: &domain::TerminalRef) -> pb::TerminalRef {
     pb::TerminalRef {
         session: Some(pb::SessionRef {
@@ -414,6 +483,27 @@ pub fn runtime_status(error: RuntimeError) -> Status {
             cursor_expired(pb::QueryKind::Read, None, Some(missing))
         }
         RuntimeError::InvalidQuery { .. } => Status::invalid_argument("invalid terminal query"),
+        RuntimeError::EventRangeCleared {
+            after_event_seq,
+            pruned_through_seq,
+            available_after_seq,
+        } => rich_status(
+            Code::FailedPrecondition,
+            "requested event range was already cleared",
+            pb::ErrorDetail {
+                reason: pb::ErrorReason::EventRangeCleared.into(),
+                payload: Some(pb::error_detail::Payload::EventRangeCleared(
+                    pb::EventRangeClearedDetails {
+                        after_event_seq,
+                        pruned_through_seq,
+                        available_after_seq,
+                    },
+                )),
+            },
+        ),
+        RuntimeError::EventAckOutOfBounds { .. } => {
+            Status::invalid_argument("event ack exceeds the committed event bound")
+        }
         _ => Status::internal("terminal operation failed"),
     }
 }

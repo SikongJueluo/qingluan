@@ -12,6 +12,7 @@ enum ErrorReason {
   ERROR_REASON_TERMINAL_NOT_WRITABLE = 4;
   ERROR_REASON_PARTIAL_WRITE = 5;
   ERROR_REASON_RESOURCE_EXHAUSTED = 6;
+  ERROR_REASON_EVENT_RANGE_CLEARED = 7;
 }
 
 enum QueryKind {
@@ -60,6 +61,15 @@ message ResourceExhaustedDetails {
   ResourceKind kind = 1;
 }
 
+// Recovery bounds for an event replay that started strictly before the
+// session's pruned prefix. `available_after_seq` is the earliest safe
+// resumption bound; the client must choose explicitly, never skip ahead.
+message EventRangeClearedDetails {
+  uint64 after_event_seq = 1;
+  uint64 pruned_through_seq = 2;
+  uint64 available_after_seq = 3;
+}
+
 message ErrorDetail {
   ErrorReason reason = 1;
   oneof payload {
@@ -68,5 +78,6 @@ message ErrorDetail {
     TerminalNotWritableDetails terminal_not_writable = 4;
     PartialWriteDetails partial_write = 5;
     ResourceExhaustedDetails resource_exhausted = 6;
+    EventRangeClearedDetails event_range_cleared = 7;
   }
 }

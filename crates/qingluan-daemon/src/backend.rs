@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use qingluan_core::terminal::{
-    ControlGeneration, LogIdentity, ReadRequest, ReadResult, SendReceipt, SessionEventState,
-    SessionRef, StartSpec, TailView, TerminalRef, TerminalSnapshot,
+    ControlGeneration, EventPage, LogIdentity, ReadRequest, ReadResult, SendReceipt,
+    SessionEventState, SessionRef, StartSpec, TailView, TerminalRef, TerminalSnapshot,
 };
 use qingluan_terminal::{RuntimeError, SendError, TerminalRuntime};
 
@@ -20,6 +20,25 @@ pub trait TerminalBackend: Send + Sync + 'static {
 
     async fn ensure_session(&self, session: &SessionRef)
     -> Result<SessionEventState, RuntimeError>;
+
+    /// One bounded, ordered page of a session's committed lifecycle events
+    /// strictly after `after_event_seq`, with consistent watermarks. A
+    /// request before the pruned bound fails with
+    /// [`RuntimeError::EventRangeCleared`].
+    async fn events_after(
+        &self,
+        session: &SessionRef,
+        after_event_seq: u64,
+    ) -> Result<EventPage, RuntimeError>;
+
+    /// Cumulative event acknowledgement; a bound beyond the committed
+    /// bound fails with [`RuntimeError::EventAckOutOfBounds`] and writes
+    /// nothing.
+    async fn ack_events(
+        &self,
+        session: &SessionRef,
+        up_to_seq: u64,
+    ) -> Result<SessionEventState, RuntimeError>;
 
     async fn start(
         &self,
@@ -66,6 +85,22 @@ impl TerminalBackend for TerminalRuntime {
         session: &SessionRef,
     ) -> Result<SessionEventState, RuntimeError> {
         TerminalRuntime::ensure_session(self, session).await
+    }
+
+    async fn events_after(
+        &self,
+        session: &SessionRef,
+        after_event_seq: u64,
+    ) -> Result<EventPage, RuntimeError> {
+        TerminalRuntime::events_after(self, session, after_event_seq).await
+    }
+
+    async fn ack_events(
+        &self,
+        session: &SessionRef,
+        up_to_seq: u64,
+    ) -> Result<SessionEventState, RuntimeError> {
+        TerminalRuntime::ack_events(self, session, up_to_seq).await
     }
 
     async fn start(

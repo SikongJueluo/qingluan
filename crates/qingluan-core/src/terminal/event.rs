@@ -140,6 +140,27 @@ pub enum SessionEventPayload {
     OutputClosed(OutputEnd),
 }
 
+/// One bounded, ordered page of a session's committed lifecycle events plus
+/// a consistent watermark snapshot.
+///
+/// This is the domain read shape served across the terminal seam (and from
+/// there to the daemon adapter); it deliberately mirrors nothing from the
+/// persistence layer beyond the values themselves. `events` is strictly
+/// ascending and strictly after the requested exclusive lower bound, never
+/// extending past the snapshot's `last_committed_seq`. `next_after_seq` is
+/// the continuation bound when the page was cut short; `None` means the
+/// page reached `last_committed_seq`. The page-size bound itself is owned
+/// by the persistence seam and is not part of this type's contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventPage {
+    /// Watermarks consistent with `events`.
+    pub state: SessionEventState,
+    /// Ordered events: strictly ascending `event_seq`.
+    pub events: Vec<SessionEvent>,
+    /// Continuation bound for a cut page, if more events remain.
+    pub next_after_seq: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +253,38 @@ mod tests {
             event.payload,
             SessionEventPayload::OutputClosed(OutputEnd::Eof)
         );
+    }
+
+    #[test]
+    fn event_page_carries_watermarks_and_continuation() {
+        let session = SessionRef {
+            source: SessionSource::new("pi"),
+            external_id: ExternalSessionId::new("s1"),
+        };
+        let events = (1..=3u64)
+            .map(|seq| SessionEvent {
+                terminal: TerminalRef {
+                    session: session.clone(),
+                    terminal_id: TerminalId::new("t1"),
+                },
+                event_seq: EventSequence::new(seq).expect("seq starts at 1"),
+                payload: SessionEventPayload::OutputClosed(OutputEnd::Eof),
+            })
+            .collect::<Vec<_>>();
+        let complete = EventPage {
+            state: SessionEventState::new(0, 0, 3).unwrap(),
+            events: events.clone(),
+            next_after_seq: None,
+        };
+        assert_eq!(complete.events.last().unwrap().event_seq.get(), 3);
+        assert!(complete.next_after_seq.is_none());
+
+        let cut = EventPage {
+            state: SessionEventState::new(0, 0, 9).unwrap(),
+            events,
+            next_after_seq: Some(3),
+        };
+        assert_eq!(cut.next_after_seq, Some(3));
+        assert_eq!(cut.state.last_committed_seq(), 9);
     }
 }

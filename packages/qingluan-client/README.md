@@ -1,11 +1,12 @@
 # qingluan-client
 
-TypeScript client for the qingluan terminal daemon's gRPC surface (S7).
-It owns connection/reconnect, one-controller lease handling with renewal,
-explicit read cursors, richer `google.rpc.Status`/`ErrorDetail` decoding
-with bounded degradation, and result-unknown semantics for side-effecting
-calls. It does not own approval, host UI, notifications, event
-subscriptions (S8), or observation/cleanup (S9).
+TypeScript client for the qingluan terminal daemon's gRPC surface (S7, plus
+the S8 session-event RPCs). It owns connection/reconnect, one-controller
+lease handling with renewal, explicit read cursors, richer
+`google.rpc.Status`/`ErrorDetail` decoding with bounded degradation,
+result-unknown semantics for side-effecting calls, and the session event
+watch/ack surface (`watchSessionEvents`/`ackSessionEvents`). It does not
+own approval, host UI, notifications, or observation/cleanup (S9).
 
 The public API is the hand-written wrapper exported from `src/index.ts`.
 The generated protobuf code under `src/generated/` is a build artifact
@@ -37,6 +38,24 @@ every uint64 exactly.
   or otherwise ambiguous statuses produce `unknown`.
 - A competing acquire surfaces `control_busy`; the holder is never
   preempted.
+- `watchSessionEvents(session, afterEventSeq)` is a lease-free async
+  generator of bounded, ordered event batches. The position is explicit:
+  it advances only past fully yielded batches/events, reconnects after
+  reconnectable transport loss (`unavailable`) or a clean unexpected
+  end-of-stream resubscribe from exactly that position (the client never
+  introduces duplicates itself; server-side duplicates across reconnects
+  are the consumer's to dedupe), and watching never acknowledges. Every
+  other stream failure throws terminally — including the typed
+  `event_range_cleared` recovery bounds
+  (`afterEventSeq`/`prunedThroughSeq`/`availableAfterSeq` as exact
+  bigints), storage degradation (`internal`/`data_loss`/`unknown`),
+  cancellations, deadlines, and malformed events that fail closed (an
+  event with a missing/unrecognized payload is never surfaced or acked).
+  Cancelling the signal (or ending iteration) closes the call.
+- `ackSessionEvents(lease, upToSeq)` is a side-effecting call like the
+  others: never auto-retried, ambiguous transport completion is `unknown`
+  and leaves the lease `uncertain`, and a bound beyond the committed bound
+  is a definite `failed`.
 - The first read needs an explicit position (`earliest`/`at`/`newest`);
   pagination continues from the server-minted `next` cursor whose
   `endLine` is fixed. A stale cursor surfaces `cursor_expired` with the

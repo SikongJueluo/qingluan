@@ -6,7 +6,11 @@ import { Status as RpcStatus } from "./generated/google/rpc/status.js";
 import {
   TransportFailure,
   type InvokeOptions,
+  type StreamHandle,
+  type StreamOptions,
+  type StreamingTerminalMethod,
   type TerminalMethod,
+  type TerminalTransport,
   type UnaryTransport,
 } from "./transport.js";
 
@@ -48,12 +52,27 @@ export interface RecordedCall {
   signal: AbortSignal | undefined;
 }
 
+export interface RecordedStreamCall {
+  method: StreamingTerminalMethod;
+  request: unknown;
+  deadline: number | undefined;
+  signal: AbortSignal | undefined;
+}
+
+type MockStreamEntry =
+  | { kind: "batch"; batch: unknown }
+  | { kind: "failure"; failure: TransportFailure }
+  | { kind: "end" };
+
 export type MockStep = (call: RecordedCall) => unknown;
 
 /** Scripted in-process transport: records calls, pops queued results. */
-export class MockTransport implements UnaryTransport {
+export class MockTransport implements TerminalTransport {
   readonly calls: RecordedCall[] = [];
+  readonly streamCalls: RecordedStreamCall[] = [];
   readonly queue: MockStep[] = [];
+  private readonly streamQueue: MockStreamEntry[] = [];
+  private streamWaiters: Array<() => void> = [];
   connectCalls = 0;
   closed = false;
 
@@ -90,6 +109,52 @@ export class MockTransport implements UnaryTransport {
     return { promise, cancel: () => cancel?.() };
   }
 
+  watch(
+    method: StreamingTerminalMethod,
+    request: unknown,
+    options: StreamOptions,
+  ): StreamHandle {
+    this.streamCalls.push({ method, request, deadline: options.deadline, signal: options.signal });
+    const mock = this;
+    let cancelled = false;
+    const wake = (): void => {
+      const waiters = mock.streamWaiters;
+      mock.streamWaiters = [];
+      for (const waiter of waiters) {
+        waiter();
+      }
+    };
+    const doCancel = (): void => {
+      cancelled = true;
+      wake();
+    };
+    options.signal?.addEventListener("abort", doCancel, { once: true });
+    const batches = async function* (): AsyncGenerator<unknown, void, unknown> {
+      if (options.signal?.aborted) {
+        throw new TransportFailure(1, "cancelled", []);
+      }
+      for (;;) {
+        while (mock.streamQueue.length === 0 && !cancelled) {
+          await new Promise<void>((resolve) => {
+            mock.streamWaiters.push(resolve);
+          });
+        }
+        if (cancelled) {
+          throw new TransportFailure(1, "cancelled", []);
+        }
+        const entry = mock.streamQueue.shift();
+        if (entry === undefined || entry.kind === "end") {
+          return;
+        }
+        if (entry.kind === "failure") {
+          throw entry.failure;
+        }
+        yield entry.batch;
+      }
+    };
+    return { batches: batches(), cancel: doCancel };
+  }
+
   close(): void {
     this.closed = true;
   }
@@ -105,6 +170,39 @@ export class MockTransport implements UnaryTransport {
     this.queue.push(() => {
       throw error;
     });
+    return this;
+  }
+
+  /** Queue one watch batch for the next (or currently open) stream. */
+  pushStreamBatch(value: unknown): this {
+    this.streamQueue.push({ kind: "batch", batch: value });
+    const waiters = this.streamWaiters;
+    this.streamWaiters = [];
+    for (const waiter of waiters) {
+      waiter();
+    }
+    return this;
+  }
+
+  /** Queue a stream failure that ends the current stream iteration. */
+  pushStreamFailure(error: TransportFailure): this {
+    this.streamQueue.push({ kind: "failure", failure: error });
+    const waiters = this.streamWaiters;
+    this.streamWaiters = [];
+    for (const waiter of waiters) {
+      waiter();
+    }
+    return this;
+  }
+
+  /** End the current stream iteration cleanly (server closed the stream). */
+  endStream(): this {
+    this.streamQueue.push({ kind: "end" });
+    const waiters = this.streamWaiters;
+    this.streamWaiters = [];
+    for (const waiter of waiters) {
+      waiter();
+    }
     return this;
   }
 }

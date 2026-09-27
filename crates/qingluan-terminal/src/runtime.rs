@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use qingluan_core::terminal::{
-    ControlGeneration, GrepLimits, GrepPage, GrepRequest, HistoryPosition, LogIdentity, ReadLimits,
-    ReadRequest, ReadResult, SendReceipt, SessionEventState, SessionRef, StartSpec, TailPosition,
-    TailView, TerminalId, TerminalRef, TerminalSize, TerminalSnapshot,
+    ControlGeneration, EventPage, GrepLimits, GrepPage, GrepRequest, HistoryPosition, LogIdentity,
+    ReadLimits, ReadRequest, ReadResult, SendReceipt, SessionEventState, SessionRef, StartSpec,
+    TailPosition, TailView, TerminalId, TerminalRef, TerminalSize, TerminalSnapshot,
 };
 use qingluan_storage::{LogStore, RuntimeRecord, RuntimeRegistry};
 use tokio::sync::watch;
@@ -331,6 +331,50 @@ impl TerminalRuntime {
         self.inner
             .registry
             .event_state(session)
+            .await
+            .map_err(storage_error)
+    }
+
+    /// One bounded, ordered page of the session's committed lifecycle
+    /// events, strictly after `after_event_seq`, with watermarks read
+    /// consistently in the same transaction.
+    ///
+    /// A request starting strictly before the session's pruned bound is
+    /// [`RuntimeError::EventRangeCleared`] (carrying the cleared prefix and
+    /// the earliest recoverable resumption bound) instead of a silent jump
+    /// to the newest event. A storage page is converted privately into the
+    /// core [`EventPage`]; no persistence type crosses this seam.
+    pub async fn events_after(
+        &self,
+        session: &SessionRef,
+        after_event_seq: u64,
+    ) -> Result<EventPage, RuntimeError> {
+        self.inner
+            .registry
+            .events_after(session, after_event_seq)
+            .await
+            .map(|page| EventPage {
+                state: page.state,
+                events: page.events,
+                next_after_seq: page.next_after_seq,
+            })
+            .map_err(storage_error)
+    }
+
+    /// Cumulatively acknowledge the session's events up to `up_to_seq`.
+    ///
+    /// Monotonic and bounded: repeats are harmless, the bound never
+    /// regresses, and a bound beyond the durable `last_committed_seq` is
+    /// [`RuntimeError::EventAckOutOfBounds`] with nothing written. Returns
+    /// the resulting watermark state.
+    pub async fn ack_events(
+        &self,
+        session: &SessionRef,
+        up_to_seq: u64,
+    ) -> Result<SessionEventState, RuntimeError> {
+        self.inner
+            .registry
+            .ack_events(session, up_to_seq)
             .await
             .map_err(storage_error)
     }

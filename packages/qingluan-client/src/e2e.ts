@@ -16,11 +16,13 @@ import process from "node:process";
 
 import {
   formatReadCursor,
+  formatSessionEventState,
   formatUint64,
   TerminalClient,
   type ClientError,
   type ControlLease,
   type Outcome,
+  type SessionEventBatch,
 } from "./index.js";
 
 const socket = process.argv[2];
@@ -280,5 +282,181 @@ const resent = await survivor.send(
 assert.deepEqual(resent, { status: "ok", value: { writtenBytes: 11n } });
 survivor.close();
 console.log("phase 3 ok (reconnect after daemon death)");
+
+
+// ── Phase 4: S8 session events — replay, ack, cleared history, bigint ───
+
+const eventsSession = { source: "ts-client", externalId: "events" };
+const clearedSession = { source: "ts-client", externalId: "events-cleared" };
+const bigSession = { source: "ts-client", externalId: "events-big" };
+
+const eventsClient = new TerminalClient({ socketPath: socket, renewIntervalMs: 500 });
+await eventsClient.connect();
+
+// Ordered replay from zero: full identity, payloads, and watermark.
+const replayed: SessionEventBatch[] = [];
+for await (const batch of eventsClient.watchSessionEvents(eventsSession, 0n)) {
+  replayed.push(batch);
+  break; // the seeded history replays as one batch
+}
+assert.equal(replayed.length, 1);
+assert.deepEqual(
+  replayed[0].events.map((event) => event.eventSeq),
+  [1n, 2n, 3n],
+);
+assert.deepEqual(
+  replayed[0].events.map((event) => event.payload.kind),
+  ["process_exited", "output_closed", "process_exited"],
+);
+assert.deepEqual(replayed[0].events[0].payload, { kind: "process_exited", result: { exitCode: 0 } });
+assert.deepEqual(replayed[0].events[1].payload, { kind: "output_closed", end: "eof" });
+assert.deepEqual(replayed[0].events[2].payload, { kind: "process_exited", result: { signal: 9 } });
+assert.equal(replayed[0].state.ackedThroughSeq, 0n);
+assert.equal(replayed[0].state.lastCommittedSeq, 3n);
+for (const event of replayed[0].events) {
+  assert.deepEqual(event.session, eventsSession);
+  assert.ok(["client", "fixture"].includes(event.terminalId));
+}
+
+// The after position is explicit and exclusive.
+const resumedFromTwo: SessionEventBatch[] = [];
+for await (const batch of eventsClient.watchSessionEvents(eventsSession, 2n)) {
+  resumedFromTwo.push(batch);
+  break;
+}
+assert.deepEqual(
+  resumedFromTwo[0].events.map((event) => event.eventSeq),
+  [3n],
+);
+
+// Lease-gated cumulative ack: monotonic, harmless repeat, bounded.
+const eventsLease = await eventsClient.acquireControl(eventsSession);
+const ackTwo = await eventsClient.ackSessionEvents(eventsLease, 2n);
+assert.equal(ackTwo.status, "ok");
+if (ackTwo.status === "ok") {
+  assert.equal(ackTwo.value.ackedThroughSeq, 2n);
+}
+const ackRepeat = await eventsClient.ackSessionEvents(eventsLease, 1n);
+assert.equal(ackRepeat.status, "ok");
+if (ackRepeat.status === "ok") {
+  assert.equal(ackRepeat.value.ackedThroughSeq, 2n);
+}
+const ackThree = await eventsClient.ackSessionEvents(eventsLease, 3n);
+assert.equal(ackThree.status, "ok");
+if (ackThree.status === "ok") {
+  assert.equal(ackThree.value.ackedThroughSeq, 3n);
+  assert.equal(ackThree.value.lastCommittedSeq, 3n);
+}
+const outOfBounds = await eventsClient.ackSessionEvents(eventsLease, 4n);
+mustBeFailed(outOfBounds, "generic");
+if (outOfBounds.status === "failed" && outOfBounds.error.kind === "generic") {
+  assert.equal(outOfBounds.error.code, 3); // INVALID_ARGUMENT
+}
+assert.equal(eventsLease.state, "held");
+
+// Disconnect/reconnect continuation: cancel a live watch at a known
+// position, commit a new event through control, then resubscribe from the
+// last fully yielded position — only the new event arrives, no replay.
+const watchController = new AbortController();
+let cancelledCode: number | undefined;
+const watching = (async (): Promise<SessionEventBatch[]> => {
+  const seen: SessionEventBatch[] = [];
+  try {
+    for await (const batch of eventsClient.watchSessionEvents(eventsSession, 3n, {
+      signal: watchController.signal,
+    })) {
+      seen.push(batch);
+    }
+  } catch (error) {
+    cancelledCode = (error as ClientError & { code?: number }).code;
+  }
+  return seen;
+})();
+await sleep(400); // the subscription establishes its watermark
+watchController.abort();
+const seenWhileWatching = await watching;
+assert.ok(seenWhileWatching.length >= 1);
+assert.ok(seenWhileWatching.every((batch) => batch.events.length === 0));
+assert.equal(cancelledCode, 1); // CANCELLED closes the call
+
+const appended = await eventsClient.send(eventsLease, {
+  terminalId: "client",
+  data: encoder.encode("event:exit:7"),
+});
+assert.equal(appended.status, "ok");
+
+const continued: SessionEventBatch[] = [];
+for await (const batch of eventsClient.watchSessionEvents(eventsSession, 3n)) {
+  continued.push(batch);
+  if (batch.events.length > 0) {
+    break;
+  }
+}
+assert.equal(continued.length, 1);
+assert.deepEqual(
+  continued[0].events.map((event) => event.eventSeq),
+  [4n],
+);
+assert.deepEqual(continued[0].events[0].payload, { kind: "process_exited", result: { exitCode: 7 } });
+await eventsClient.releaseControl(eventsLease);
+eventsClient.close();
+
+// Cleared history: typed recovery bounds, then an explicit resume at the
+// recovered bound.
+const clearedClient = new TerminalClient({ socketPath: socket });
+await clearedClient.connect();
+let clearedError: ClientError | undefined;
+try {
+  for await (const _batch of clearedClient.watchSessionEvents(clearedSession, 3n)) {
+    assert.fail("cleared history must terminate the watch");
+  }
+} catch (error) {
+  clearedError = error as ClientError;
+}
+assert.ok(clearedError);
+assert.equal(clearedError.kind, "event_range_cleared");
+if (clearedError.kind === "event_range_cleared") {
+  assert.deepEqual(
+    [clearedError.afterEventSeq, clearedError.prunedThroughSeq, clearedError.availableAfterSeq],
+    [3n, 5n, 5n],
+  );
+}
+const resumedAtBound: SessionEventBatch[] = [];
+for await (const batch of clearedClient.watchSessionEvents(clearedSession, 5n)) {
+  resumedAtBound.push(batch);
+  break;
+}
+assert.deepEqual(
+  resumedAtBound[0].events.map((event) => event.eventSeq),
+  [6n, 7n, 8n],
+);
+assert.equal(resumedAtBound[0].state.prunedThroughSeq, 5n);
+clearedClient.close();
+
+// bigint exactness: a sequence beyond 2^53 survives replay and ack.
+const bigClient = new TerminalClient({ socketPath: socket, renewIntervalMs: 500 });
+await bigClient.connect();
+const bigSeq = 9_007_199_254_740_993n;
+const bigBatch: SessionEventBatch[] = [];
+for await (const batch of bigClient.watchSessionEvents(bigSession, 0n)) {
+  bigBatch.push(batch);
+  break;
+}
+assert.equal(bigBatch[0].events[0].eventSeq, bigSeq);
+assert.equal(formatUint64(bigBatch[0].events[0].eventSeq), "9007199254740993");
+const bigLease = await bigClient.acquireControl(bigSession);
+const bigAck = await bigClient.ackSessionEvents(bigLease, bigSeq);
+assert.equal(bigAck.status, "ok");
+if (bigAck.status === "ok") {
+  assert.equal(bigAck.value.ackedThroughSeq, bigSeq);
+  assert.deepEqual(formatSessionEventState(bigAck.value), {
+    ackedThroughSeq: "9007199254740993",
+    lastCommittedSeq: "9007199254740993",
+    prunedThroughSeq: "0",
+  });
+}
+await bigClient.releaseControl(bigLease);
+bigClient.close();
+console.log("phase 4 ok (session events: replay, ack, cleared, bigint)");
 
 console.log("S7_CLIENT_E2E_OK");

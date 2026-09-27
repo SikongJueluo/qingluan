@@ -1,7 +1,8 @@
-//! grpc-js implementation of the {@link UnaryTransport} seam: a Unix-domain
-//! socket channel to the qingluan daemon with per-call deadlines and
-//! cancellation, plus raw `grpc-status-details-bin` passthrough for the
-//! richer-error decoder.
+//! grpc-js implementation of the {@link TerminalTransport} seam: a
+//! Unix-domain socket channel to the qingluan daemon with per-call
+//! deadlines and cancellation for unary RPCs, a server-streaming path for
+//! WatchSessionEvents with the same deadline/AbortSignal cleanup, and raw
+//! `grpc-status-details-bin` passthrough for the richer-error decoder.
 
 import * as grpc from "@grpc/grpc-js";
 import { TerminalServiceClient } from "./generated/qingluan/terminal/v1/terminal.js";
@@ -9,8 +10,11 @@ import {
   TransportFailure,
   type InvokeHandle,
   type InvokeOptions,
+  type StreamHandle,
+  type StreamOptions,
+  type StreamingTerminalMethod,
   type TerminalMethod,
-  type UnaryTransport,
+  type TerminalTransport,
 } from "./transport.js";
 
 type ClientMethod = (
@@ -20,7 +24,13 @@ type ClientMethod = (
   callback: (error: grpc.ServiceError | null, response: unknown) => void,
 ) => grpc.ClientUnaryCall;
 
-export class GrpcUnaryTransport implements UnaryTransport {
+type ClientStreamingMethod = (
+  request: unknown,
+  metadata: grpc.Metadata,
+  options: grpc.CallOptions,
+) => grpc.ClientReadableStream<unknown>;
+
+export class GrpcTransport implements TerminalTransport {
   private readonly client: TerminalServiceClient;
   private closed = false;
 
@@ -90,12 +100,71 @@ export class GrpcUnaryTransport implements UnaryTransport {
     return { promise, cancel: doCancel };
   }
 
+  watch(
+    _method: StreamingTerminalMethod,
+    request: unknown,
+    options: StreamOptions,
+  ): StreamHandle {
+    const metadata = new grpc.Metadata();
+    const callOptions: grpc.CallOptions = {};
+    if (options.deadline !== undefined) {
+      callOptions.deadline = options.deadline;
+    }
+    const invoke = this.client.watchSessionEvents as unknown as ClientStreamingMethod;
+    const call = invoke.call(this.client, request, metadata, callOptions);
+    let abortAttached = false;
+    const doCancel = (): void => {
+      call.cancel();
+    };
+    const cleanupAbort = (): void => {
+      if (abortAttached) {
+        options.signal?.removeEventListener("abort", doCancel);
+        abortAttached = false;
+      }
+    };
+    if (options.signal) {
+      if (options.signal.aborted) {
+        doCancel();
+      } else {
+        options.signal.addEventListener("abort", doCancel, { once: true });
+        abortAttached = true;
+      }
+    }
+    call.once("end", cleanupAbort);
+    call.once("error", cleanupAbort);
+    const batches = async function* (this: void): AsyncGenerator<unknown, void, unknown> {
+      try {
+        // grpc-js ClientReadableStream is async-iterable: messages are
+        // yielded in order and a failed stream rejects the iteration with
+        // its ServiceError (metadata included).
+        for await (const message of call) {
+          yield message;
+        }
+      } catch (error) {
+        if (isServiceError(error)) {
+          throw toTransportFailure(error);
+        }
+        throw error;
+      }
+    };
+    return { batches: batches(), cancel: doCancel };
+  }
+
   close(): void {
     if (!this.closed) {
       this.closed = true;
       this.client.close();
     }
   }
+}
+
+function isServiceError(error: unknown): error is grpc.ServiceError {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "number"
+  );
 }
 
 function toTransportFailure(error: grpc.ServiceError): TransportFailure {
