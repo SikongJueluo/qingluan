@@ -10,6 +10,8 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  ChevronDown,
+  ChevronUp,
   CircleQuestionMark,
   FileDiff,
   FileText,
@@ -18,7 +20,7 @@ import {
 } from 'lucide-vue-next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { mockSubmissions } from '@/approvals/mock-data'
+import { useApprovalsStore } from '@/approvals/store'
 import {
   approveHint,
   statusLabel,
@@ -30,8 +32,8 @@ import {
 
 const route = useRoute()
 const router = useRouter()
-
-const items = ref<ReviewSubmission[]>(mockSubmissions.map((s) => ({ ...s })))
+const store = useApprovalsStore()
+const items = computed(() => store.items)
 
 const typeIcon: Record<SubmissionType, typeof FileDiff> = {
   diff: FileDiff,
@@ -105,15 +107,22 @@ function say(msg: string) {
 }
 
 function approve(s: ReviewSubmission) {
-  s.status = 'done'
+  store.approve(s.id)
   say(`已同意 · ${approveHint[s.type]} ·「${s.title}」`)
 }
 
-// TODO(daemon): mock id 没有真实会话，接数据源后跳转对应审查页
+/** confirm 类型在卡片内展开完整问题与上下文，不跳页。 */
+const expandedId = ref<string | null>(null)
+
 function openDetail(s: ReviewSubmission) {
-  if (s.type === 'diff') say(`打开 diff 审查 ${s.id} · ${s.range ?? ''}`)
-  else if (s.type === 'markdown') say(`打开文档审查 ${s.id}`)
-  else say(`展开完整问题与上下文 ${s.id}`)
+  if (s.type === 'diff') {
+    // TODO(daemon): mock id 没有真实会话，接数据源后带 from/to query
+    void router.push(`/review/${s.id}`)
+  } else if (s.type === 'markdown') {
+    void router.push(`/markdown-review/${s.id}`)
+  } else {
+    expandedId.value = expandedId.value === s.id ? null : s.id
+  }
 }
 
 function badgeVariant(s: ReviewSubmission) {
@@ -184,49 +193,72 @@ function severityDot(s: ReviewSubmission) {
           </div>
         </div>
 
-        <div
-          v-for="s in g.list"
-          :key="s.id"
-          class="group flex items-center gap-4 rounded-xl border p-4 transition-colors hover:border-foreground/25 hover:shadow-sm"
-        >
-          <span class="h-8 w-1 shrink-0 rounded-full" :class="severityDot(s)" />
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <Badge :variant="badgeVariant(s)">
-                <component :is="typeIcon[s.type]" data-icon="inline-start" />
-                {{ typeLabel[s.type] }}
-              </Badge>
-              <span class="truncate text-sm font-medium">{{ s.title }}</span>
-            </div>
-            <div
-              class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground"
-            >
-              <span class="truncate">{{ s.source }}</span>
-              <span>·</span>
-              <span class="font-mono">{{ s.repo }}</span>
-              <span>·</span>
-              <span>{{ s.age }}</span>
-              <template v-if="s.type === 'diff'">
+        <template v-for="s in g.list" :key="s.id">
+          <div
+            class="group flex items-center gap-4 rounded-xl border p-4 transition-colors hover:border-foreground/25 hover:shadow-sm"
+          >
+            <span class="h-8 w-1 shrink-0 rounded-full" :class="severityDot(s)" />
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <Badge :variant="badgeVariant(s)">
+                  <component :is="typeIcon[s.type]" data-icon="inline-start" />
+                  {{ typeLabel[s.type] }}
+                </Badge>
+                <span class="truncate text-sm font-medium">{{ s.title }}</span>
+              </div>
+              <div
+                class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground"
+              >
+                <span class="truncate">{{ s.source }}</span>
                 <span>·</span>
-                <span class="flex items-center gap-1 font-mono">
-                  <GitCommitHorizontal class="size-3.5" />
-                  {{ s.commits }}c {{ s.range }}
-                </span>
-                <span class="tabular-nums">
-                  <span class="text-green-600 dark:text-green-400">+{{ s.additions }}</span>
-                  <span class="text-red-600 dark:text-red-400"> −{{ s.deletions }}</span>
-                </span>
-              </template>
-              <template v-else>
-                <span v-if="s.excerpt?.length">· {{ s.excerpt[0] }}</span>
-              </template>
+                <span class="font-mono">{{ s.repo }}</span>
+                <span>·</span>
+                <span>{{ s.age }}</span>
+                <template v-if="s.type === 'diff'">
+                  <span>·</span>
+                  <span class="flex items-center gap-1 font-mono">
+                    <GitCommitHorizontal class="size-3.5" />
+                    {{ s.commits }}c {{ s.range }}
+                  </span>
+                  <span class="tabular-nums">
+                    <span class="text-green-600 dark:text-green-400">+{{ s.additions }}</span>
+                    <span class="text-red-600 dark:text-red-400"> −{{ s.deletions }}</span>
+                  </span>
+                </template>
+                <template v-else>
+                  <span v-if="s.excerpt?.length">· {{ s.excerpt[0] }}</span>
+                </template>
+              </div>
+            </div>
+            <div class="flex shrink-0 items-center gap-1.5">
+              <Button size="sm" variant="ghost" @click="openDetail(s)">
+                {{ s.type === 'confirm' && expandedId === s.id ? '收起' : '详情' }}
+                <component
+                  :is="s.type === 'confirm' && expandedId === s.id ? ChevronUp : ChevronDown"
+                  v-if="s.type === 'confirm'"
+                  class="size-3.5"
+                />
+              </Button>
+              <Button size="sm" @click="approve(s)">同意</Button>
             </div>
           </div>
-          <div class="flex shrink-0 items-center gap-1.5">
-            <Button size="sm" variant="ghost" @click="openDetail(s)">详情</Button>
-            <Button size="sm" @click="approve(s)">同意</Button>
+
+          <!-- confirm：展开完整问题与上下文 -->
+          <div
+            v-if="s.type === 'confirm' && expandedId === s.id"
+            class="-mt-2 ml-5 mr-28 rounded-lg bg-muted/40 p-4 text-xs"
+          >
+            <p class="mb-2 font-medium">问题与上下文</p>
+            <p
+              v-for="(line, i) in s.excerpt"
+              :key="i"
+              class="leading-relaxed text-muted-foreground"
+            >
+              {{ line }}
+            </p>
+            <p class="mt-3 text-muted-foreground">「同意」= {{ approveHint[s.type] }}</p>
           </div>
-        </div>
+        </template>
       </template>
 
       <div

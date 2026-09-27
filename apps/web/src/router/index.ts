@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import ApprovalsView from '@/views/ApprovalsView.vue'
 import HomeView from '@/views/HomeView.vue'
-import MarkdownReviewDemoView from '@/views/MarkdownReviewDemoView.vue'
+import MarkdownReviewView from '@/views/MarkdownReviewView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -17,9 +17,10 @@ const router = createRouter({
       component: ApprovalsView,
     },
     {
-      path: '/markdown-review',
+      // 不在侧边栏露出：由审批收件箱「详情」进入（同 /review/:id 模式）
+      path: '/markdown-review/:id',
       name: 'markdown-review',
-      component: MarkdownReviewDemoView,
+      component: MarkdownReviewView,
     },
     {
       path: '/kanban',
