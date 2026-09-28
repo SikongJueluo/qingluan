@@ -28,30 +28,71 @@
           {{ copied ? '已复制' : '复制为 Markdown' }}
         </Button>
       </div>
-      <p v-if="!files.length" class="text-sm text-muted-foreground">此范围内没有变更。</p>
-      <CodeReviewDiff
-        v-for="(file, index) in files"
-        :key="file.path"
-        :file="file"
-        :index="index"
-        :session-id="sessionId"
-      />
+
+      <!-- 单文件模式：编辑器式主区域，只渲染选中的文件（已展开）。 -->
+      <template v-if="selectedMeta">
+        <div class="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            title="回到总览（全部文件）"
+            @click="explorer.select(null)"
+          >
+            <ArrowLeft class="size-4" />
+            总览
+          </Button>
+          <span class="truncate font-mono text-sm">{{ selectedMeta.path }}</span>
+          <span class="shrink-0 text-xs tabular-nums">
+            <span class="text-green-600">+{{ selectedMeta.additions }}</span>
+            <span class="text-red-600"> −{{ selectedMeta.deletions }}</span>
+          </span>
+          <span
+            v-if="store.countForFile(selectedMeta.path)"
+            class="shrink-0 text-xs text-muted-foreground"
+          >
+            {{ store.countForFile(selectedMeta.path) }} 条评论
+          </span>
+        </div>
+        <CodeReviewDiff
+          :key="selectedMeta.path"
+          :file="selectedMeta"
+          :index="selectedIndex!"
+          :session-id="sessionId"
+          start-expanded
+        />
+      </template>
+
+      <!-- 总览：全部文件堆叠（懒加载折叠，与文件树点击联动）。 -->
+      <template v-else>
+        <p v-if="!files.length" class="text-sm text-muted-foreground">此范围内没有变更。</p>
+        <CodeReviewDiff
+          v-for="(file, index) in files"
+          :key="file.path"
+          :file="file"
+          :index="index"
+          :session-id="sessionId"
+        />
+      </template>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
-import { Clipboard, ClipboardCheck, GitPullRequest } from 'lucide-vue-next'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ArrowLeft, Clipboard, ClipboardCheck, GitPullRequest } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
 import CodeReviewDiff from '@/components/code-review/CodeReviewDiff.vue'
 import type { ChangedFileMeta } from '@/components/code-review/types'
 import { reviewApi } from '@/lib/review-api'
 import { commentsMarkdown } from '@/lib/review-export'
 import { useReviewCommentsStore } from '@/stores/reviewComments'
+import { useReviewExplorerStore } from '@/stores/reviewExplorer'
 
 const route = useRoute()
+const router = useRouter()
 const store = useReviewCommentsStore()
+const explorer = useReviewExplorerStore()
 
 const sessionId = computed(() => String(route.params.id ?? ''))
 // From/to are informational; the diff itself was snapshotted at session
@@ -65,6 +106,28 @@ const error = ref<string | null>(null)
 
 const totalAdditions = computed(() => files.value.reduce((sum, f) => sum + f.additions, 0))
 const totalDeletions = computed(() => files.value.reduce((sum, f) => sum + f.deletions, 0))
+
+/* ---------- 文件树联动：单文件视图 + ?file= URL 保位 ---------- */
+
+const selectedMeta = computed(() =>
+  explorer.selectedFile ? explorer.fileByPath.get(explorer.selectedFile) : undefined,
+)
+const selectedIndex = computed(() =>
+  selectedMeta.value ? files.value.findIndex((f) => f.path === selectedMeta.value!.path) : -1,
+)
+
+// 选中文件同步到 ?file= query：刷新 / 分享 / 返回键都能保位。
+watch(
+  () => explorer.selectedFile,
+  (file) => {
+    if (route.name !== 'code-review') return
+    const current = route.query.file
+    const next = file ?? undefined
+    if ((current ?? undefined) !== next) {
+      void router.replace({ query: { ...route.query, file: next } })
+    }
+  },
+)
 
 const copied = ref(false)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
@@ -92,10 +155,18 @@ onMounted(async () => {
   try {
     files.value = await reviewApi.listFiles(sessionId.value)
     await store.open(sessionId.value)
+    explorer.openSession(sessionId.value, files.value)
+    // 从 URL 恢复上次看到的位置（?file=，无效路径忽略）。
+    const file = route.query.file
+    explorer.select(typeof file === 'string' && file ? file : null)
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     loading.value = false
   }
+})
+
+onUnmounted(() => {
+  explorer.clear()
 })
 </script>

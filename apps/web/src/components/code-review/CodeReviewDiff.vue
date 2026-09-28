@@ -43,7 +43,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ChevronRight, FileCode, MessageSquare } from 'lucide-vue-next'
 import { basicSetup } from 'codemirror'
 import { EditorState } from '@codemirror/state'
@@ -68,13 +68,15 @@ const props = defineProps<{
   /** Index into the session's file list (daemon text endpoint). */
   index: number
   sessionId: string
+  /** 直接展开（文件树点进的单文件视图用）；默认折叠懒加载。 */
+  startExpanded?: boolean
 }>()
 
 const store = useReviewCommentsStore()
 const editorEl = ref<HTMLElement | null>(null)
 // Collapsed by default: file text is fetched lazily on first expand
 // (two-level loading keeps a 200-file review cheap).
-const collapsed = ref(true)
+const collapsed = ref(!props.startExpanded)
 const loaded = ref(false)
 const error = ref<string | null>(null)
 const draft = ref<ReviewAnchor | null>(null)
@@ -180,6 +182,13 @@ const callbacks: ReviewCallbacks = {
 }
 
 watch([() => store.comments, draft], pushComments, { deep: true })
+
+// 单文件视图（startExpanded）：挂载即拉取内容并初始化编辑器。
+onMounted(() => {
+  if (props.startExpanded && !collapsed.value && !loaded.value && !props.file.binary) {
+    void loadContents()
+  }
+})
 
 onBeforeUnmount(() => {
   view?.destroy()
