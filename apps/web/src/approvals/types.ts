@@ -39,6 +39,8 @@ export interface ReviewSubmission {
   /** 排序用 */
   ageHours: number
   comments: number
+  /** daemon 会话的批准时间（epoch 毫秒）；未批准为 undefined。 */
+  approvedAt?: number
   /** diff 专属：审查对象是 from..to 范围（往往多个 commit 合并后） */
   files?: number
   additions?: number

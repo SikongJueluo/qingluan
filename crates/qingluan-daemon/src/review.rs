@@ -61,6 +61,14 @@ pub enum Side {
     New,
 }
 
+/// Review lifecycle state (console inbox flow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewStatus {
+    Open,
+    Approved,
+}
+
 /// One review comment (frontend `ReviewComment`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,9 +104,53 @@ pub struct ReviewSession {
     pub root: PathBuf,
     pub from: String,
     pub to: String,
+    /// Unix epoch milliseconds.
+    pub created_at: u64,
+    pub status: ReviewStatus,
+    /// Unix epoch milliseconds; set on first approve.
+    pub approved_at: Option<u64>,
     pub files: Vec<ChangedFileMeta>,
     contents: Vec<FileContents>,
     comments: Vec<ReviewComment>,
+}
+
+/// Console-inbox listing entry (`GET /reviews`): everything the home and
+/// approvals pages need, without file contents or comment bodies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSessionSummary {
+    pub id: String,
+    /// Directory the diff was computed in.
+    pub root: String,
+    pub from: String,
+    pub to: String,
+    /// Unix epoch milliseconds.
+    pub created_at: u64,
+    pub status: ReviewStatus,
+    /// Unix epoch milliseconds; `None` until approved.
+    pub approved_at: Option<u64>,
+    pub files: usize,
+    pub additions: u64,
+    pub deletions: u64,
+    pub comments: usize,
+}
+
+impl ReviewSession {
+    fn summary(&self) -> ReviewSessionSummary {
+        ReviewSessionSummary {
+            id: self.id.clone(),
+            root: self.root.display().to_string(),
+            from: self.from.clone(),
+            to: self.to.clone(),
+            created_at: self.created_at,
+            status: self.status,
+            approved_at: self.approved_at,
+            files: self.files.len(),
+            additions: self.files.iter().map(|f| f.additions).sum(),
+            deletions: self.files.iter().map(|f| f.deletions).sum(),
+            comments: self.comments.len(),
+        }
+    }
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -366,6 +418,9 @@ pub fn create_session(root: &Path, from: &str, to: &str) -> Result<ReviewSession
         root: root.to_path_buf(),
         from: from.to_owned(),
         to: to.to_owned(),
+        created_at: now_ms(),
+        status: ReviewStatus::Open,
+        approved_at: None,
         files,
         contents,
         comments: Vec::new(),
@@ -439,6 +494,33 @@ impl ReviewStore {
             .expect("review store poisoned")
             .insert(id.clone(), session);
         id
+    }
+
+    /// All session summaries, newest first (console inbox listing).
+    pub fn list(&self) -> Vec<ReviewSessionSummary> {
+        let mut list: Vec<ReviewSessionSummary> = self
+            .sessions
+            .lock()
+            .expect("review store poisoned")
+            .values()
+            .map(|s| s.summary())
+            .collect();
+        list.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        list
+    }
+
+    /// Mark a session approved (idempotent; the first call fixes
+    /// `approved_at`).
+    pub fn approve(&self, id: &str) -> Result<ReviewSessionSummary, CommentError> {
+        let mut sessions = self.sessions.lock().expect("review store poisoned");
+        let session = sessions
+            .get_mut(id)
+            .ok_or_else(|| CommentError::SessionNotFound(id.to_owned()))?;
+        if session.status == ReviewStatus::Open {
+            session.status = ReviewStatus::Approved;
+            session.approved_at = Some(now_ms());
+        }
+        Ok(session.summary())
     }
 
     pub fn files(&self, id: &str) -> Option<Vec<ChangedFileMeta>> {
@@ -587,7 +669,8 @@ pub struct FileTextResponse {
 /// Review routes, mounted under the app router.
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/reviews", post(create_review))
+        .route("/reviews", get(list_reviews).post(create_review))
+        .route("/reviews/{id}/approve", post(approve_review))
         .route("/reviews/{id}/files", get(list_files))
         .route("/reviews/{id}/files/{index}", get(get_file_text))
         .route(
@@ -598,6 +681,23 @@ pub fn router() -> Router<Arc<AppState>> {
             "/reviews/{id}/comments/{comment_id}",
             patch(update_comment).delete(delete_comment),
         )
+}
+
+/// GET /reviews — console inbox listing, newest first.
+async fn list_reviews(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<ReviewSessionSummary>>> {
+    Json(ApiResponse::success(state.reviews.list()))
+}
+
+/// POST /reviews/{id}/approve — mark a session approved from the console.
+async fn approve_review(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<String>,
+) -> Result<Json<ApiResponse<ReviewSessionSummary>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let summary = state.reviews.approve(&id).map_err(api_error)?;
+    tracing::info!("review session {id} approved");
+    Ok(Json(ApiResponse::success(summary)))
 }
 
 /// POST /reviews — snapshot a jj diff into a new session.
@@ -842,6 +942,9 @@ index 1..2 100644
             root: PathBuf::from("/tmp/repo"),
             from: "main".into(),
             to: "@".into(),
+            created_at: 1_000,
+            status: ReviewStatus::Open,
+            approved_at: None,
             files: vec![ChangedFileMeta {
                 path: "a.rs".into(),
                 status: ChangeStatus::Modified,
@@ -895,6 +998,9 @@ index 1..2 100644
             root: PathBuf::from("/tmp/repo"),
             from: "main".into(),
             to: "@".into(),
+            created_at: 1_000,
+            status: ReviewStatus::Open,
+            approved_at: None,
             files: vec![ChangedFileMeta {
                 path: "known.rs".into(),
                 status: ChangeStatus::Modified,
@@ -927,5 +1033,138 @@ index 1..2 100644
             Err(CommentError::InvalidRange)
         ));
         assert!(store.comments("missing").is_none());
+    }
+
+    /// Minimal open session with one file, for store-level tests.
+    fn test_session(id: &str, created_at: u64) -> ReviewSession {
+        ReviewSession {
+            id: id.into(),
+            root: PathBuf::from("/tmp/repo"),
+            from: "main".into(),
+            to: "@".into(),
+            created_at,
+            status: ReviewStatus::Open,
+            approved_at: None,
+            files: vec![ChangedFileMeta {
+                path: "a.rs".into(),
+                status: ChangeStatus::Modified,
+                additions: 2,
+                deletions: 1,
+                binary: false,
+            }],
+            contents: vec![FileContents::default()],
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn list_returns_summaries_newest_first() {
+        let store = ReviewStore::default();
+        store.insert(test_session("old", 1_000));
+        store.insert(test_session("new", 2_000));
+
+        let list = store.list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "new");
+        assert_eq!(list[1].id, "old");
+        assert_eq!(list[0].root, "/tmp/repo");
+        assert_eq!(list[0].files, 1);
+        assert_eq!(list[0].additions, 2);
+        assert_eq!(list[0].deletions, 1);
+        assert_eq!(list[0].comments, 0);
+        assert_eq!(list[0].status, ReviewStatus::Open);
+        assert_eq!(list[0].approved_at, None);
+    }
+
+    #[test]
+    fn approve_marks_session_done_and_is_idempotent() {
+        let store = ReviewStore::default();
+        store.insert(test_session("s", 1_000));
+
+        let first = store.approve("s").expect("approve");
+        assert_eq!(first.status, ReviewStatus::Approved);
+        let approved_at = first.approved_at.expect("approved_at set");
+
+        let second = store.approve("s").expect("re-approve");
+        assert_eq!(second.status, ReviewStatus::Approved);
+        assert_eq!(second.approved_at, Some(approved_at));
+
+        assert!(matches!(
+            store.approve("missing"),
+            Err(CommentError::SessionNotFound(_))
+        ));
+    }
+
+    /// HTTP-level check of the console endpoints on the real router the
+    /// daemon mounts (`GET /reviews`, `POST /reviews/{id}/approve`).
+    #[tokio::test]
+    async fn console_endpoints_list_and_approve_over_http() {
+        use std::sync::Arc;
+
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use qingluan_protocol::ApiResponse;
+        use tower::ServiceExt;
+
+        let state = Arc::new(AppState::default());
+        state.reviews.insert(test_session("http-old", 1_000));
+        state.reviews.insert(test_session("http-new", 2_000));
+        let app = super::router().with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/reviews")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("list request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let payload: ApiResponse<Vec<ReviewSessionSummary>> =
+            serde_json::from_slice(&body).expect("list json");
+        let list = payload.data.expect("list data");
+        assert_eq!(
+            list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["http-new", "http-old"],
+        );
+        assert_eq!(list[0].status, ReviewStatus::Open);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/reviews/http-old/approve")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("approve request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("approve body");
+        let payload: ApiResponse<ReviewSessionSummary> =
+            serde_json::from_slice(&body).expect("approve json");
+        let summary = payload.data.expect("approve data");
+        assert_eq!(summary.status, ReviewStatus::Approved);
+        assert!(summary.approved_at.is_some());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/reviews/missing/approve")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("missing approve request");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

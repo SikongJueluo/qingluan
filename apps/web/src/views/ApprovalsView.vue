@@ -1,13 +1,14 @@
 <!--
-  审批收件箱（原型 E 定稿，完整变体存档见 bookmark prototype/home-ui）。
-  减法版：卡片只放简略内容 + 两个按钮（同意 / 详情）。
-  - 同意的语义随类型不同：diff → agent rebase 到主分支；confirm → 按建议继续；
-    markdown → 定稿。详情 → 进入对应完整审查页评论后反馈给 agent。
-  - 分组可切换：按仓库（默认）/ 按工作区 / 按状态。
-  - 过滤来自主页统计卡（?filter=type|status）。数据源见 src/approvals/mock-data.ts。
+  审批收件箱：卡片只放简略内容 + 两个按钮（同意 / 详情）。
+  - 数据源是 daemon review 会话列表（GET /reviews，10s 轮询）；
+    「同意」调 POST /reviews/{id}/approve 落内存状态（重启即清）。
+  - 详情 → 进入对应完整审查页（/review/:id，真实 daemon API）评论后
+    反馈给 agent。
+  - 分组可切换：按仓库（默认）/ 按状态。
+  - 过滤来自主页统计卡（?filter=type|status）。
 -->
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ChevronDown,
@@ -34,6 +35,13 @@ const route = useRoute()
 const router = useRouter()
 const store = useApprovalsStore()
 const items = computed(() => store.items)
+
+let pollTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  void store.refresh()
+  pollTimer = setInterval(() => void store.refresh(), 10_000)
+})
+onBeforeUnmount(() => clearInterval(pollTimer))
 
 const typeIcon: Record<SubmissionType, typeof FileDiff> = {
   diff: FileDiff,
@@ -70,19 +78,17 @@ const queue = computed(() => {
   return items.value.filter((s) => s.type === (f as SubmissionType) && s.status !== 'done')
 })
 
-/* ---------- 分组：仓库 / 工作区 / 状态 ---------- */
+/* ---------- 分组：仓库 / 状态 ---------- */
 
-type GroupMode = 'repo' | 'workspace' | 'status'
+type GroupMode = 'repo' | 'status'
 const groupMode = ref<GroupMode>('repo')
 const groupModes: { key: GroupMode; label: string }[] = [
   { key: 'repo', label: '按仓库' },
-  { key: 'workspace', label: '按工作区' },
   { key: 'status', label: '按状态' },
 ]
 
 function groupKey(s: ReviewSubmission) {
   if (groupMode.value === 'repo') return s.repo
-  if (groupMode.value === 'workspace') return s.source
   return statusLabel[s.status]
 }
 
@@ -106,9 +112,13 @@ function say(msg: string) {
   toastTimer = setTimeout(() => (toast.value = ''), 2400)
 }
 
-function approve(s: ReviewSubmission) {
-  store.approve(s.id)
-  say(`已同意 · ${approveHint[s.type]} ·「${s.title}」`)
+async function approve(s: ReviewSubmission) {
+  try {
+    await store.approve(s.id)
+    say(`已同意 · ${approveHint[s.type]} ·「${s.title}」`)
+  } catch (e) {
+    say(`同意失败：${e instanceof Error ? e.message : 'daemon 不可达'}`)
+  }
 }
 
 /** confirm 类型在卡片内展开完整问题与上下文，不跳页。 */
@@ -116,7 +126,6 @@ const expandedId = ref<string | null>(null)
 
 function openDetail(s: ReviewSubmission) {
   if (s.type === 'diff') {
-    // TODO(daemon): mock id 没有真实会话，接数据源后带 from/to query
     void router.push(`/review/${s.id}`)
   } else if (s.type === 'markdown') {
     void router.push(`/markdown-review/${s.id}`)
@@ -181,6 +190,14 @@ function severityDot(s: ReviewSubmission) {
       </div>
     </Transition>
 
+    <!-- daemon 不可达提示 -->
+    <div
+      v-if="store.error"
+      class="mx-auto mt-3 w-full max-w-3xl rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs text-amber-700 dark:text-amber-400"
+    >
+      无法连接 daemon：{{ store.error }}（<code class="font-mono">qingluan daemon start</code>）
+    </div>
+
     <!-- 卡片流 -->
     <div class="mx-auto w-full max-w-3xl flex-1 space-y-5 overflow-y-auto p-6">
       <template v-for="g in groups" :key="g.key">
@@ -218,9 +235,9 @@ function severityDot(s: ReviewSubmission) {
                   <span>·</span>
                   <span class="flex items-center gap-1 font-mono">
                     <GitCommitHorizontal class="size-3.5" />
-                    {{ s.commits }}c {{ s.range }}
+                    {{ s.range }}
                   </span>
-                  <span class="tabular-nums">
+                  <span v-if="s.additions !== undefined" class="tabular-nums">
                     <span class="text-green-600 dark:text-green-400">+{{ s.additions }}</span>
                     <span class="text-red-600 dark:text-red-400"> −{{ s.deletions }}</span>
                   </span>
@@ -262,11 +279,13 @@ function severityDot(s: ReviewSubmission) {
       </template>
 
       <div
-        v-if="!queue.length"
+        v-if="!queue.length && !store.error"
         class="flex flex-col items-center gap-2 py-16 text-muted-foreground"
       >
         <p class="text-sm font-medium text-foreground">收件箱已清空 🎉</p>
-        <p class="text-xs">agent 会把新的提交推进来</p>
+        <p class="text-xs">
+          cli 执行 <code class="font-mono">qingluan review &lt;dir&gt;</code> 触发新的审查
+        </p>
       </div>
     </div>
   </div>

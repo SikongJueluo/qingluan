@@ -9,6 +9,27 @@ interface ApiResponse<T> {
 
 export type ReviewSide = 'old' | 'new'
 
+/** Session lifecycle state (`ReviewSessionSummary.status`). */
+export type ReviewStatus = 'open' | 'approved'
+
+/** Console-inbox listing entry (`GET /reviews`). */
+export interface ReviewSessionSummary {
+  id: string
+  /** Directory the diff was computed in. */
+  root: string
+  from: string
+  to: string
+  /** Unix epoch milliseconds. */
+  createdAt: number
+  status: ReviewStatus
+  /** Unix epoch milliseconds; null until approved. */
+  approvedAt: number | null
+  files: number
+  additions: number
+  deletions: number
+  comments: number
+}
+
 /** New comment payload (`POST /reviews/{id}/comments`). */
 export interface NewReviewComment {
   file: string
@@ -34,7 +55,14 @@ export class ReviewApi {
       ...init,
       headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
-    const payload = (await res.json()) as ApiResponse<T>
+    let payload: ApiResponse<T> | undefined
+    try {
+      payload = (await res.json()) as ApiResponse<T>
+    } catch {
+      // Non-JSON body: a static server (vite preview) or a proxy answered
+      // instead of the daemon — treat it as "daemon not reachable".
+      throw new Error(`daemon request failed (${path}): daemon 不可达`)
+    }
     if (!res.ok || !payload.ok || payload.data === undefined) {
       const detail = payload.error
         ? `${payload.error.code}: ${payload.error.message}`
@@ -49,6 +77,16 @@ export class ReviewApi {
       method: 'POST',
       body: JSON.stringify({ path, from, to }),
     })
+  }
+
+  /** Console inbox listing, newest first. */
+  listSessions(): Promise<ReviewSessionSummary[]> {
+    return this.request('/reviews')
+  }
+
+  /** Mark a session approved; idempotent. */
+  approveSession(id: string): Promise<ReviewSessionSummary> {
+    return this.request(`/reviews/${id}/approve`, { method: 'POST' })
   }
 
   listFiles(id: string): Promise<ChangedFileMeta[]> {
