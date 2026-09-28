@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { HTMLAttributes } from 'vue'
+import { computed } from 'vue'
 import { cn } from '@/lib/utils'
 import { useSidebar } from './utils'
 
@@ -68,20 +69,24 @@ function onClick() {
   }
   toggleSidebar()
 }
+
+// Collapsed, the rail is click-only: drags are refused, so the cursor and
+// hint must not advertise resizing.
+const collapsed = computed(() => state.value === 'collapsed')
 </script>
 
 <template>
   <button
     data-sidebar="rail"
     data-slot="sidebar-rail"
-    aria-label="调整侧边栏宽度"
+    :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'"
     :tabindex="-1"
-    title="拖动调整宽度；双击恢复默认；单击收起/展开"
+    :title="collapsed ? '单击展开侧边栏' : '拖动调整宽度；双击恢复默认；单击收起'"
     :class="
       cn(
         'hover:after:bg-sidebar-border absolute inset-y-0 z-20 hidden w-4 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:start-1/2 after:w-[2px] sm:flex ltr:-translate-x-1/2 rtl:-translate-x-1/2',
-        'in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize',
-        '[[data-side=left][data-state=collapsed]_&]:cursor-e-resize [[data-side=right][data-state=collapsed]_&]:cursor-w-resize',
+        '[[data-side=left][data-state=expanded]_&]:cursor-w-resize [[data-side=right][data-state=expanded]_&]:cursor-e-resize',
+        '[[data-state=collapsed]_&]:cursor-pointer',
         'group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:after:left-full hover:group-data-[collapsible=offcanvas]:bg-sidebar',
         '[[data-side=left][data-collapsible=offcanvas]_&]:-right-2',
         '[[data-side=right][data-collapsible=offcanvas]_&]:-left-2',
