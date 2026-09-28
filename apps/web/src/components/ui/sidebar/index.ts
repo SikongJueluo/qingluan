@@ -31,6 +31,7 @@ export { default as SidebarMenuSubItem } from './SidebarMenuSubItem.vue'
 export { default as SidebarProvider } from './SidebarProvider.vue'
 export { default as SidebarRail } from './SidebarRail.vue'
 export { default as SidebarSeparator } from './SidebarSeparator.vue'
+export { default as SidebarToggle } from './SidebarToggle.vue'
 export { default as SidebarTrigger } from './SidebarTrigger.vue'
 
 export { useSidebar } from './utils'

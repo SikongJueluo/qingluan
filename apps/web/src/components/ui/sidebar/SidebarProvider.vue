@@ -5,12 +5,14 @@ import { TooltipProvider } from 'reka-ui'
 import { computed, ref } from 'vue'
 import { cn } from '@/lib/utils'
 import {
+  clampSidebarWidth,
   provideSidebarContext,
   SIDEBAR_COOKIE_MAX_AGE,
   SIDEBAR_COOKIE_NAME,
   SIDEBAR_KEYBOARD_SHORTCUT,
-  SIDEBAR_WIDTH,
+  SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_ICON,
+  SIDEBAR_WIDTH_STORAGE_KEY,
 } from './utils'
 
 const props = withDefaults(
@@ -64,6 +66,32 @@ useEventListener('keydown', (event: KeyboardEvent) => {
 // This makes it easier to style the sidebar with Tailwind classes.
 const state = computed(() => (open.value ? 'expanded' : 'collapsed'))
 
+// Drag-adjustable sidebar width, persisted in localStorage like the cookie state above.
+function readStoredSidebarWidth(): number {
+  try {
+    const stored = Number.parseFloat(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY) ?? '')
+    return Number.isFinite(stored) ? clampSidebarWidth(stored) : SIDEBAR_WIDTH_DEFAULT
+  } catch {
+    return SIDEBAR_WIDTH_DEFAULT
+  }
+}
+
+const sidebarWidth = ref<number>(readStoredSidebarWidth())
+const resizing = ref(false)
+
+function setSidebarWidth(px: number) {
+  sidebarWidth.value = clampSidebarWidth(px)
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth.value))
+  } catch {
+    // Persistence is best-effort; the in-memory width still applies.
+  }
+}
+
+function resetSidebarWidth() {
+  setSidebarWidth(SIDEBAR_WIDTH_DEFAULT)
+}
+
 provideSidebarContext({
   state,
   open,
@@ -72,6 +100,10 @@ provideSidebarContext({
   openMobile,
   setOpenMobile,
   toggleSidebar,
+  sidebarWidth,
+  setSidebarWidth,
+  resetSidebarWidth,
+  resizing,
 })
 </script>
 
@@ -80,7 +112,7 @@ provideSidebarContext({
     <div
       data-slot="sidebar-wrapper"
       :style="{
-        '--sidebar-width': SIDEBAR_WIDTH,
+        '--sidebar-width': `${sidebarWidth}px`,
         '--sidebar-width-icon': SIDEBAR_WIDTH_ICON,
       }"
       :class="

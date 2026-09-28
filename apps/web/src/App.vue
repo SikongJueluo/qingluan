@@ -1,6 +1,6 @@
 <template>
   <SidebarProvider>
-    <Sidebar>
+    <Sidebar collapsible="icon">
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
@@ -24,7 +24,7 @@
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
-                <SidebarMenuButton as-child>
+                <SidebarMenuButton as-child tooltip="Home">
                   <router-link to="/">
                     <Home />
                     <span>Home</span>
@@ -32,7 +32,7 @@
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton as-child>
+                <SidebarMenuButton as-child tooltip="审批">
                   <router-link to="/approvals">
                     <Inbox />
                     <span>审批</span>
@@ -40,7 +40,7 @@
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton as-child>
+                <SidebarMenuButton as-child tooltip="任务看板">
                   <router-link to="/kanban">
                     <Kanban />
                     <span>任务看板</span>
@@ -51,17 +51,12 @@
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter />
+      <SidebarFooter>
+        <SidebarToggle />
+      </SidebarFooter>
       <SidebarRail />
     </Sidebar>
     <SidebarInset>
-      <header
-        class="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12"
-      >
-        <div class="flex items-center gap-2 px-4">
-          <SidebarTrigger class="-ml-1" />
-        </div>
-      </header>
       <div class="flex flex-1 flex-col">
         <router-view />
       </div>
@@ -84,7 +79,7 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarRail,
-  SidebarTrigger,
+  SidebarToggle,
 } from '@/components/ui/sidebar'
 import { Home, Bird, Kanban, Inbox } from 'lucide-vue-next'
 </script>
