@@ -4,6 +4,7 @@ members = [
   "crates/qingluan-core",
   "crates/qingluan-protocol",
   "crates/qingluan-config",
+  "crates/qingluan-complexity",
   "crates/qingluan-cli",
   "crates/qingluan-daemon",
   "crates/qingluan-sandbox",

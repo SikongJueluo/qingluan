@@ -29,6 +29,7 @@ pub struct Config {
     pub terminal: TerminalConfig,
     pub sandbox: SandboxConfig,
     pub cube: CubeConfig,
+    pub complexity: ComplexityConfig,
 }
 
 /// Workspace placement for `qingluan workspace add`.
@@ -140,6 +141,36 @@ pub struct CubeConfig {
     pub template: Option<String>,
 }
 
+/// Defaults for `qingluan complexity`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ComplexityConfig {
+    /// Rows in the human-readable top-K table.
+    pub top: usize,
+    /// Cyclomatic complexity above this counts as over threshold
+    /// (Sonar S1541 default).
+    pub cc_threshold: u32,
+    /// Cognitive complexity above this counts as over threshold
+    /// (Sonar S3776 default).
+    pub cognitive_threshold: u32,
+    /// Extra exclude globs, on top of the built-in generated/vendor list.
+    pub exclude: Vec<String>,
+    /// Include globs. Empty means every file with a known grammar.
+    pub include: Vec<String>,
+}
+
+impl Default for ComplexityConfig {
+    fn default() -> Self {
+        Self {
+            top: 10,
+            cc_threshold: 10,
+            cognitive_threshold: 15,
+            exclude: Vec::new(),
+            include: Vec::new(),
+        }
+    }
+}
+
 /// Path of the global configuration file (`$XDG_CONFIG_HOME` honored).
 pub fn global_config_path() -> PathBuf {
     dirs::config_dir()
@@ -220,6 +251,29 @@ mod tests {
         // Schema-only sections have defaults but no consumer yet.
         assert_eq!(config.sandbox.provider, "local");
         assert_eq!(config.cube.endpoint, None);
+    }
+
+    #[test]
+    fn complexity_defaults_apply_and_can_be_overridden() {
+        let defaults = load_both("", "").expect("defaults load");
+        assert_eq!(defaults.complexity.top, 10);
+        assert_eq!(defaults.complexity.cc_threshold, 10);
+        assert_eq!(defaults.complexity.cognitive_threshold, 15);
+        assert!(defaults.complexity.exclude.is_empty());
+
+        let config = load_both(
+            r#"[complexity]
+top = 5
+cognitive_threshold = 20
+exclude = ["**/fixtures/**"]
+"#,
+            "",
+        )
+        .expect("complexity section loads");
+        assert_eq!(config.complexity.top, 5);
+        assert_eq!(config.complexity.cc_threshold, 10);
+        assert_eq!(config.complexity.cognitive_threshold, 20);
+        assert_eq!(config.complexity.exclude, vec!["**/fixtures/**"]);
     }
 
     #[test]

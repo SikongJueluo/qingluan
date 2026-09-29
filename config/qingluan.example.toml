@@ -47,3 +47,15 @@ provider = "local"
 # endpoint = "http://127.0.0.1:8000"
 # api_key = "env:CUBE_API_KEY"
 # template = "qingluan-dev"
+
+[complexity]
+# Defaults for `qingluan complexity`.
+# Rows in the human-readable top-K table (--top overrides per run).
+top = 10
+# A function counts as over threshold above these (Sonar S1541 / S3776).
+cc_threshold = 10
+cognitive_threshold = 15
+# Extra exclude globs, on top of the built-in generated/vendor list.
+# exclude = ["**/fixtures/**"]
+# Include globs; empty means every file with a bundled grammar.
+# include = ["crates/**"]

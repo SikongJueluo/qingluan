@@ -120,7 +120,7 @@ daemon 后续复用同一 crate 给 review UI 打复杂度标（`GET /reviews/<i
 - 工作区**尚无** `ignore` / `walkdir` / `globset` / `rayon`，需新增依赖（或复用 `ignore` 自带的并行遍历）
 - 调研文档 §5.4 的手算示例可直接做 golden test（CC=7、cognitive=15、白皮书 `sumOfPrimes`=7）
 
-## 实现顺序（拟，确认后落 `issues/`）
+## 实现顺序（已落 `issues/`，01–05 已完成）
 
 1. `01-crate-and-rust-grammar` — 新建 crate + tree-sitter 接入 + 单语言（Rust）跑通函数边界
 2. `02-counter-kernel` — 语言无关计数器 + golden test（含白皮书逻辑序列边界：`a&&b&&c`=1、`a||b&&c||d`=3）
@@ -136,3 +136,20 @@ daemon 后续复用同一 crate 给 review UI 打复杂度标（`GET /reviews/<i
 | 首要场景 | 体检 + 增量守门，分阶段 | 全仓 top-K 每次运行结果相同，对「这次改动有没有变糟」零信息量；但体检更简单、立刻有用 |
 | v1 是否 gate | 不做 | 推迟跨运行函数标识（本功能最贵的部分），v1 只需单次运行内的行号区间匹配 |
 | 默认输出 | 摘要 + top-K | 纯阈值在遗留仓库不可读、纯 top-K 在干净仓库无参照；分布语境让数字可判断 |
+
+## 落地补记（2026-09-30，01–05 已实现）
+
+实现细节与实测证据在 `issues/01`–`issues/05` 的 Comments。三处 spec 没写到、
+但实现时必须定的事：
+
+1. **逻辑运算符序列的确切算法**：以 sonar-java `CognitiveComplexityVisitor` 为准
+   （flatten 整棵 component 后比相邻 operator；括号透明、`!`/调用/三元是边界），
+   与白皮书全部公开例子一致。SonarJS 2024-10 起 `||`/`??` 免计的偏差**不跟进**；
+   `??` 按普通短路运算符计。推导、源码引用与 7 个表达式对照表见
+   `research/logical-sequences.md`。
+2. **`else` 的层级**：按 sonar-java，`else` 只 +1，块内层级由外层 `if` 一次性抬升。
+   kernel 因此在遍历 `if` 子树时就降层，代价是 `if` 条件里的三元比 sonar-java 多
+   算一层嵌套（已在 `src/kernel.rs` 顶部注明）。
+3. **`<script>` 型文件仍算 unsupported**：本仓 `apps/web` 有 111 个 `.vue`，会全部
+   计入 `unsupported`（可见而非静默）。要覆盖得做「抽 script 块 + 行号偏移」，
+   不在本期范围。

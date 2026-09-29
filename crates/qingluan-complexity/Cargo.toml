@@ -1,0 +1,28 @@
+[package]
+name = "qingluan-complexity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Function boundaries come from tree-sitter: its error recovery means a diff
+# that does not compile still yields a tree we can walk, which is the whole
+# point for reviewing agent output. Grammar crates and the core move on
+# independent release trains; this set resolves against core 0.25.
+tree-sitter = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+
+# Worktree walking (gitignore-aware) and include/exclude globs.
+globset = "0.4"
+ignore = "0.4"
+rayon = "1"
+
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

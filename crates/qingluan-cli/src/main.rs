@@ -3,16 +3,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use console::{Alignment, Style, Term, measure_text_width, pad_str, style, truncate_str};
 use dialoguer::{Confirm, FuzzySelect, Input, theme::ColorfulTheme};
+use qingluan_complexity::{Distribution, FunctionMetrics, ScanReport, distribution};
 use qingluan_core::workspace::{
     SessionSummary, WorkspaceCatalog, WorkspaceSummary, add_workspace, discover, forget_workspace,
     jj_root, list_jj_workspaces, parse_iso8601_ms, workspace_clean,
 };
 use qingluan_protocol::{ApiResponse, HealthResponse};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Qingluan CLI — stable agent entry point for the Qingluan task platform.
 ///
@@ -67,6 +68,39 @@ enum Commands {
         json: bool,
     },
 
+    /// Function-level complexity scan (local; no daemon involved).
+    ///
+    /// Prints a distribution summary plus the worst K functions. With no
+    /// PATH, scans the current directory.
+    Complexity {
+        /// Files or directories to scan (default: the current directory).
+        paths: Vec<PathBuf>,
+
+        /// List every function instead of the worst K.
+        #[arg(long)]
+        all: bool,
+
+        /// List only functions above the configured thresholds.
+        #[arg(long)]
+        threshold: bool,
+
+        /// Metric to rank by.
+        #[arg(long, value_enum, default_value_t = ComplexitySort::Cognitive)]
+        sort: ComplexitySort,
+
+        /// Rows in the human-readable table (config: complexity.top).
+        #[arg(long)]
+        top: Option<usize>,
+
+        /// Machine-readable JSON on stdout; always complete, never truncated.
+        #[arg(long)]
+        json: bool,
+
+        /// Print only the summary and distribution lines.
+        #[arg(long)]
+        quiet: bool,
+    },
+
     /// Run the Qingluan daemon (HTTP/web plus terminal gRPC) in the foreground.
     Daemon {
         #[command(subcommand)]
@@ -78,6 +112,27 @@ enum Commands {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
+}
+
+/// Ranking metric for `qingluan complexity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ComplexitySort {
+    /// Sonar cognitive complexity (nesting-sensitive).
+    Cognitive,
+    /// McCabe cyclomatic complexity.
+    Cc,
+    /// Non-blank, non-comment lines.
+    Nloc,
+}
+
+impl ComplexitySort {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cognitive => "cognitive",
+            Self::Cc => "cc",
+            Self::Nloc => "nloc",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -205,6 +260,15 @@ async fn main() {
                 }
             }
         }
+        Commands::Complexity {
+            paths,
+            all,
+            threshold,
+            sort,
+            top,
+            json,
+            quiet,
+        } => cmd_complexity(&paths, all, threshold, sort, top, json, quiet),
         Commands::Daemon { action } => {
             // Same hard-fail semantics the daemon binary used to have:
             // malformed config must abort startup, never fall back.
@@ -1086,6 +1150,258 @@ fn comments_markdown(comments: &[ReviewCommentDto]) -> String {
     out
 }
 
+/// One function plus the file it lives in, ready for display or JSON.
+#[derive(Debug, Clone)]
+struct ComplexityRow {
+    path: String,
+    function: FunctionMetrics,
+}
+
+/// `qingluan complexity [PATH...]`: local scan, summary plus worst K.
+///
+/// Deliberately daemon-free: the engine is a pure function over file contents,
+/// so a round trip would only add latency and a failure mode.
+fn cmd_complexity(
+    paths: &[PathBuf],
+    all: bool,
+    threshold_only: bool,
+    sort: ComplexitySort,
+    top: Option<usize>,
+    json: bool,
+    quiet: bool,
+) {
+    let config = qingluan_config::load().unwrap_or_else(|e| machine_error("config_invalid", e));
+    let settings = config.complexity;
+
+    // Paths are reported relative to the invocation directory, so output does
+    // not depend on the argument shape the user picked.
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut options = qingluan_complexity::ScanOptions::new(&root);
+    if !paths.is_empty() {
+        options.paths = paths.to_vec();
+    }
+    options.include = settings.include.clone();
+    options.exclude = settings.exclude.clone();
+
+    let report = qingluan_complexity::scan(&options).unwrap_or_else(|error| {
+        let code = match error.kind() {
+            std::io::ErrorKind::NotFound => "path_not_found",
+            std::io::ErrorKind::InvalidInput => "invalid_glob",
+            _ => "scan_failed",
+        };
+        machine_error(code, error);
+    });
+    if report.files.is_empty() {
+        machine_error(
+            "no_files",
+            format!("no analyzable files under {}", report.root.display()),
+        );
+    }
+
+    let mut rows: Vec<ComplexityRow> = report
+        .files
+        .iter()
+        .flat_map(|file| {
+            let path = qingluan_complexity::scan::relative_path(&report.root, &file.path);
+            file.functions.iter().map(move |function| ComplexityRow {
+                path: path.clone(),
+                function: function.clone(),
+            })
+        })
+        .collect();
+
+    // Distributions describe the whole scan, not the filtered view: "is 87 an
+    // outlier or the norm?" has to be answered before any threshold is applied.
+    let cognitive_distribution = distribution(
+        &rows
+            .iter()
+            .map(|row| row.function.metrics.cognitive)
+            .collect::<Vec<_>>(),
+        settings.cognitive_threshold,
+    );
+    let cc_distribution = distribution(
+        &rows
+            .iter()
+            .map(|row| row.function.metrics.cc)
+            .collect::<Vec<_>>(),
+        settings.cc_threshold,
+    );
+
+    if threshold_only {
+        rows.retain(|row| {
+            row.function.metrics.cc > settings.cc_threshold
+                || row.function.metrics.cognitive > settings.cognitive_threshold
+        });
+    }
+    sort_complexity_rows(&mut rows, sort);
+
+    if json {
+        // Complete by contract: `--top` never truncates JSON.
+        println!(
+            "{}",
+            complexity_json(&report, &rows, cognitive_distribution, cc_distribution,)
+        );
+        return;
+    }
+
+    let skipped = report.skipped;
+    println!(
+        "scanned {} files, {} functions (skipped {}: {} generated, {} unsupported, {} too large)",
+        report.files.len(),
+        report.function_count(),
+        skipped.total(),
+        skipped.generated,
+        skipped.unsupported,
+        skipped.too_large,
+    );
+    println!();
+    println!(
+        "{}",
+        distribution_line(
+            "cognitive",
+            cognitive_distribution,
+            settings.cognitive_threshold
+        )
+    );
+    println!(
+        "{}",
+        distribution_line("cc", cc_distribution, settings.cc_threshold)
+    );
+
+    if quiet {
+        return;
+    }
+    if rows.is_empty() {
+        println!();
+        println!("no functions above the thresholds");
+        return;
+    }
+
+    let heading = if all {
+        format!("all functions by {}", sort.label())
+    } else if threshold_only {
+        format!("over threshold, by {}", sort.label())
+    } else {
+        format!("worst by {}", sort.label())
+    };
+    let shown = if all {
+        rows.len()
+    } else {
+        top.unwrap_or(settings.top).min(rows.len())
+    };
+
+    println!();
+    println!("{}", style(format!("{heading}:")).bold());
+    println!(
+        "{}",
+        style(format!(
+            "{:>8} {:>5} {:>6} {:>7} {:>8}  location",
+            "cog", "cc", "nloc", "params", "nesting"
+        ))
+        .dim()
+    );
+    for row in rows.iter().take(shown) {
+        let metrics = row.function.metrics;
+        println!(
+            "{:>8} {:>5} {:>6} {:>7} {:>8}  {}:{}  {}",
+            metrics.cognitive,
+            metrics.cc,
+            metrics.nloc,
+            metrics.params,
+            metrics.max_nesting,
+            row.path,
+            row.function.start_line,
+            row.function.qualified_name,
+        );
+    }
+}
+
+/// Deterministic ordering: metric desc, then CC desc, then path, then line.
+///
+/// Repeated runs over unchanged code must produce byte-identical output, or
+/// the numbers cannot be eyeballed against a previous run.
+fn sort_complexity_rows(rows: &mut [ComplexityRow], sort: ComplexitySort) {
+    let primary = |row: &ComplexityRow| match sort {
+        ComplexitySort::Cognitive => row.function.metrics.cognitive,
+        ComplexitySort::Cc => row.function.metrics.cc,
+        ComplexitySort::Nloc => row.function.metrics.nloc,
+    };
+    rows.sort_by(|a, b| {
+        primary(b)
+            .cmp(&primary(a))
+            .then_with(|| b.function.metrics.cc.cmp(&a.function.metrics.cc))
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.function.start_line.cmp(&b.function.start_line))
+    });
+}
+
+fn distribution_line(label: &str, dist: Distribution, threshold: u32) -> String {
+    format!(
+        "{label:<9}  p50 {:>4}   p90 {:>4}   p99 {:>4}   max {:>4}   >{threshold}: {}",
+        dist.p50, dist.p90, dist.p99, dist.max, dist.over_threshold
+    )
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComplexityReport {
+    schema_version: u32,
+    root: String,
+    scanned: ComplexityScanned,
+    distribution: ComplexityDistribution,
+    functions: Vec<ComplexityFunction>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComplexityScanned {
+    files: usize,
+    functions: usize,
+    skipped: qingluan_complexity::SkipStats,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComplexityDistribution {
+    cognitive: Distribution,
+    cc: Distribution,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComplexityFunction {
+    path: String,
+    #[serde(flatten)]
+    function: FunctionMetrics,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complexity_json(
+    report: &ScanReport,
+    rows: &[ComplexityRow],
+    cognitive: Distribution,
+    cc: Distribution,
+) -> String {
+    let payload = ComplexityReport {
+        schema_version: 1,
+        root: report.root.display().to_string(),
+        scanned: ComplexityScanned {
+            files: report.files.len(),
+            functions: report.function_count(),
+            skipped: report.skipped,
+        },
+        distribution: ComplexityDistribution { cognitive, cc },
+        functions: rows
+            .iter()
+            .map(|row| ComplexityFunction {
+                path: row.path.clone(),
+                function: row.function.clone(),
+            })
+            .collect(),
+    };
+    serde_json::to_string(&payload).expect("complexity report is serializable")
+}
+
 async fn cmd_health(daemon_url: &str) {
     let client = Client::new();
     match client.get(format!("{}/health", daemon_url)).send().await {
@@ -1114,6 +1430,113 @@ async fn cmd_health(daemon_url: &str) {
 mod tests {
     use super::*;
     use qingluan_core::workspace::{SessionSummary, WorkspaceSummary};
+
+    fn complexity_row(path: &str, source: &str) -> ComplexityRow {
+        let function = qingluan_complexity::analyze_source(
+            qingluan_complexity::Language::Rust,
+            source.as_bytes(),
+        )
+        .into_iter()
+        .next()
+        .expect("sample has a function");
+        ComplexityRow {
+            path: path.into(),
+            function,
+        }
+    }
+
+    #[test]
+    fn complexity_json_matches_the_documented_shape() {
+        let row = complexity_row(
+            "src/lib.rs",
+            "fn pick(a: u32) -> u32 { if a > 0 && a < 9 { 1 } else { 0 } }",
+        );
+        let report = ScanReport {
+            root: PathBuf::from("/repo"),
+            files: vec![qingluan_complexity::FileComplexity {
+                path: PathBuf::from("/repo/src/lib.rs"),
+                language: qingluan_complexity::Language::Rust,
+                functions: vec![row.function.clone()],
+            }],
+            skipped: qingluan_complexity::SkipStats {
+                generated: 1,
+                unsupported: 2,
+                too_large: 3,
+            },
+        };
+        let json: serde_json::Value = serde_json::from_str(&complexity_json(
+            &report,
+            std::slice::from_ref(&row),
+            distribution(&[1], 15),
+            distribution(&[3], 10),
+        ))
+        .expect("complexity report is JSON");
+
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["root"], "/repo");
+        assert_eq!(json["scanned"]["files"], 1);
+        assert_eq!(json["scanned"]["functions"], 1);
+        assert_eq!(json["scanned"]["skipped"]["generated"], 1);
+        assert_eq!(json["scanned"]["skipped"]["unsupported"], 2);
+        assert_eq!(json["scanned"]["skipped"]["tooLarge"], 3);
+        assert_eq!(json["distribution"]["cognitive"]["max"], 1);
+        assert_eq!(json["distribution"]["cc"]["max"], 3);
+        assert_eq!(json["distribution"]["cc"]["overThreshold"], 0);
+        assert_eq!(json["functions"][0]["path"], "src/lib.rs");
+        assert_eq!(json["functions"][0]["name"], "pick");
+        assert_eq!(json["functions"][0]["startLine"], 1);
+        assert_eq!(json["functions"][0]["cc"], 3);
+        assert_eq!(json["functions"][0]["cognitive"], 3);
+        assert_eq!(json["functions"][0]["maxNesting"], 1);
+    }
+
+    fn ranked_row(path: &str, line: usize, cc: u32) -> ComplexityRow {
+        ComplexityRow {
+            path: path.into(),
+            function: FunctionMetrics {
+                name: "f".into(),
+                qualified_name: "f".into(),
+                start_line: line,
+                end_line: line,
+                start_col: 1,
+                start_byte: 0,
+                end_byte: 1,
+                metrics: qingluan_complexity::Metrics {
+                    cc,
+                    cognitive: 5,
+                    nloc: 1,
+                    params: 0,
+                    max_nesting: 0,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn complexity_order_is_metric_then_cc_then_path_then_line() {
+        let mut rows = vec![
+            ranked_row("b.rs", 1, 2),
+            ranked_row("a.rs", 10, 2),
+            ranked_row("a.rs", 1, 9),
+            ranked_row("a.rs", 2, 2),
+        ];
+        sort_complexity_rows(&mut rows, ComplexitySort::Cognitive);
+
+        // Equal cognitive everywhere, so CC desc, then path asc, then line asc.
+        let order: Vec<(String, usize)> = rows
+            .iter()
+            .map(|row| (row.path.clone(), row.function.start_line))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("a.rs".to_string(), 1),
+                ("a.rs".to_string(), 2),
+                ("a.rs".to_string(), 10),
+                ("b.rs".to_string(), 1),
+            ]
+        );
+    }
 
     fn comment(file: &str, side: &str, from: u32, to: u32, content: &str) -> ReviewCommentDto {
         ReviewCommentDto {
