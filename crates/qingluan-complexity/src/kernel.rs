@@ -267,7 +267,10 @@ fn skip_parens<'tree>(mut node: Node<'tree>, paren_kind: &str) -> Node<'tree> {
 }
 
 /// Non-blank, non-comment lines inside the node's span.
-fn nloc(root: Node, source: &[u8], profile: &LangProfile) -> u32 {
+///
+/// Called with a function node for [`Metrics::nloc`] and with the tree root
+/// for the file-level axis, so both always share one counting rule.
+pub(crate) fn nloc(root: Node, source: &[u8], profile: &LangProfile) -> u32 {
     let start = root.start_byte();
     let end = root.end_byte().min(source.len());
     if start >= end {

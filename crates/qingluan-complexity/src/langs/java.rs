@@ -115,7 +115,7 @@ mod tests {
     use crate::{Language, analyze_source};
 
     fn java(source: &str) -> Vec<crate::FunctionMetrics> {
-        analyze_source(Language::Java, source.as_bytes())
+        analyze_source(Language::Java, source.as_bytes()).functions
     }
 
     #[test]

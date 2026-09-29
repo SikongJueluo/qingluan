@@ -26,6 +26,10 @@ const EXCLUDED_DIRS: &[&str] = &[
     "node_modules",
     "vendor",
     "third_party",
+    // `third-party` and `open_source` are the same class: vendored trees
+    // under those exact names on this machine (MG-Nav, Hi3863_SmartCar).
+    "third-party",
+    "open_source",
     "dist",
     "build",
     ".venv",
@@ -74,6 +78,30 @@ pub struct FileComplexity {
     pub path: PathBuf,
     pub language: Language,
     pub functions: Vec<FunctionMetrics>,
+    /// File-level nloc: non-blank, non-comment lines of the whole file,
+    /// same rules as the per-function nloc. A module-organization signal,
+    /// ranked on its own table — never a threshold on functions.
+    pub nloc: u32,
+}
+
+impl FileComplexity {
+    /// Worst cognitive complexity among the file's functions (0 when empty).
+    pub fn worst_cognitive(&self) -> u32 {
+        self.functions
+            .iter()
+            .map(|function| function.metrics.cognitive)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Worst cyclomatic complexity among the file's functions (0 when empty).
+    pub fn worst_cc(&self) -> u32 {
+        self.functions
+            .iter()
+            .map(|function| function.metrics.cc)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// Files left out of the scan, by reason.
@@ -259,10 +287,12 @@ fn analyze_candidate(
     let Ok(source) = std::fs::read(path) else {
         return Outcome::Ignored;
     };
+    let analysis = analyze_source(language, &source);
     Outcome::Analyzed(FileComplexity {
         path: path.to_path_buf(),
         language,
-        functions: analyze_source(language, &source),
+        functions: analysis.functions,
+        nloc: analysis.nloc,
     })
 }
 

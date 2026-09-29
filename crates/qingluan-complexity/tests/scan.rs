@@ -96,4 +96,39 @@ fn analyze_path_returns_none_for_a_file_without_a_grammar() {
     let analyzed = analyze_path(&rust).unwrap().expect("rust is supported");
     assert_eq!(analyzed.language, Language::Rust);
     assert_eq!(analyzed.functions.len(), 2);
+    assert_eq!(analyzed.nloc, 2);
+}
+
+#[test]
+fn vendored_dir_aliases_are_never_walked() {
+    // `third-party` and `open_source` showed up as fully scanned vendored
+    // trees on this machine (MG-Nav, Hi3863_SmartCar) before the aliases
+    // were added.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(root, "src/keep.rs", "fn mine() {}\n");
+    write(root, "third-party/pkg/vendored.rs", "fn v1() {}\n");
+    write(root, "prj/open_source/mbedtls/vendored.c", "int v2;\n");
+
+    let report = scan(&ScanOptions::new(root)).unwrap();
+    assert_eq!(scanned_paths(&report), vec!["src/keep.rs".to_string()]);
+}
+
+#[test]
+fn scan_reports_file_nloc_and_worst_functions() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/lib.rs",
+        "// doc\nfn hot(a: u32) -> u32 {\n    if a > 0 { 1 } else { 0 }\n}\n",
+    );
+    let report = scan(&ScanOptions::new(root)).unwrap();
+
+    let file = &report.files[0];
+    // `// doc` never counts; the remaining three lines do.
+    assert_eq!(file.nloc, 3);
+    // if(+1) + else(+1)
+    assert_eq!(file.worst_cognitive(), 2);
+    assert!(file.worst_cc() >= 2);
 }

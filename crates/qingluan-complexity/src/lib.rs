@@ -140,21 +140,40 @@ pub struct FunctionMetrics {
     pub metrics: Metrics,
 }
 
-/// Analyze one source buffer. Returns functions in document order.
+/// Everything one source buffer yields: its functions and the file-level
+/// size axis.
+///
+/// The two are siblings, never inputs to each other. File nloc is a module
+/// organization signal (`.scratch/complexity/spec.md`), reported on its own
+/// table and never folded into a function score.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceAnalysis {
+    /// Functions in document order (the `<module>` fallback included).
+    pub functions: Vec<FunctionMetrics>,
+    /// Non-blank, non-comment lines in the whole file: the same counting
+    /// rules as [`Metrics::nloc`], over the root span instead of a function.
+    pub nloc: u32,
+}
+
+/// Analyze one source buffer.
 ///
 /// Never fails: unparsable input still produces whatever tree-sitter could
 /// recover, and a file with no recoverable function yields the `<module>`
-/// fallback (or nothing at all, for a blank file).
-pub fn analyze_source(language: Language, source: &[u8]) -> Vec<FunctionMetrics> {
+/// fallback (a blank file yields nothing at all and `nloc` 0).
+pub fn analyze_source(language: Language, source: &[u8]) -> SourceAnalysis {
     let profile = language.profile();
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&(profile.grammar)())
         .expect("bundled grammar is ABI-compatible with the pinned tree-sitter core");
     let Some(tree) = parser.parse(source, None) else {
-        return Vec::new();
+        return SourceAnalysis {
+            functions: Vec::new(),
+            nloc: 0,
+        };
     };
     let root = tree.root_node();
+    let nloc = kernel::nloc(root, source, profile);
 
     let mut outer = Vec::new();
     collect_outermost_functions(root, profile.function_kinds, &mut outer);
@@ -168,7 +187,7 @@ pub fn analyze_source(language: Language, source: &[u8]) -> Vec<FunctionMetrics>
     }
 
     functions.sort_by_key(|function| (function.start_line, function.start_col));
-    functions
+    SourceAnalysis { functions, nloc }
 }
 
 /// Read and analyze one file. `Ok(None)` means the extension has no grammar.
@@ -177,11 +196,12 @@ pub fn analyze_path(path: &Path) -> std::io::Result<Option<FileComplexity>> {
         return Ok(None);
     };
     let source = std::fs::read(path)?;
-    let functions = analyze_source(language, &source);
+    let analysis = analyze_source(language, &source);
     Ok(Some(FileComplexity {
         path: path.to_path_buf(),
         language,
-        functions,
+        functions: analysis.functions,
+        nloc: analysis.nloc,
     }))
 }
 
@@ -306,5 +326,35 @@ mod tests {
         );
         assert_eq!(Language::from_path(Path::new("A.TSX")), Some(Language::Tsx));
         assert_eq!(Language::from_path(Path::new("a/b.md")), None);
+    }
+
+    #[test]
+    fn file_nloc_shares_the_function_counting_rules() {
+        // Two code lines; the line comment, block comment and blanks must not
+        // count, exactly as they would not inside a function span.
+        let analysis = analyze_source(
+            Language::Rust,
+            "// leading comment\n\nfn a() { let x = 1; }\n\n/* block\n   comment */\nstruct S { f: u32 }\n".as_bytes(),
+        );
+        assert_eq!(analysis.nloc, 2);
+        assert_eq!(analysis.functions.len(), 1);
+    }
+
+    #[test]
+    fn file_nloc_counts_script_files_without_functions() {
+        let analysis = analyze_source(
+            Language::Python,
+            "import os\n\n# setup\nx = 1\ny = 2\n".as_bytes(),
+        );
+        assert_eq!(analysis.nloc, 3);
+        assert_eq!(analysis.functions.len(), 1);
+        assert_eq!(analysis.functions[0].name, "<module>");
+    }
+
+    #[test]
+    fn file_nloc_of_an_empty_buffer_is_zero() {
+        let analysis = analyze_source(Language::Go, "\n\n".as_bytes());
+        assert_eq!(analysis.nloc, 0);
+        assert!(analysis.functions.is_empty());
     }
 }

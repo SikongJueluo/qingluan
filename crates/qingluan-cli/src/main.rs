@@ -80,7 +80,8 @@ enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// List only functions above the configured thresholds.
+        /// List only functions above the configured thresholds (cc,
+        /// cognitive and length union).
         #[arg(long)]
         threshold: bool,
 
@@ -91,6 +92,16 @@ enum Commands {
         /// Rows in the human-readable table (config: complexity.top).
         #[arg(long)]
         top: Option<usize>,
+
+        /// Also print the longest-files table (file nloc ranks; it is never
+        /// a threshold). JSON output always includes the files array.
+        #[arg(long)]
+        files: bool,
+
+        /// Add a derived cc/nloc column (cyclomatic density, Gill & Kemerer
+        /// 1991). Display only: never a threshold axis.
+        #[arg(long)]
+        density: bool,
 
         /// Machine-readable JSON on stdout; always complete, never truncated.
         #[arg(long)]
@@ -266,9 +277,13 @@ async fn main() {
             threshold,
             sort,
             top,
+            files,
+            density,
             json,
             quiet,
-        } => cmd_complexity(&paths, all, threshold, sort, top, json, quiet),
+        } => cmd_complexity(
+            &paths, all, threshold, sort, top, files, density, json, quiet,
+        ),
         Commands::Daemon { action } => {
             // Same hard-fail semantics the daemon binary used to have:
             // malformed config must abort startup, never fall back.
@@ -1161,12 +1176,15 @@ struct ComplexityRow {
 ///
 /// Deliberately daemon-free: the engine is a pure function over file contents,
 /// so a round trip would only add latency and a failure mode.
+#[allow(clippy::too_many_arguments)]
 fn cmd_complexity(
     paths: &[PathBuf],
     all: bool,
     threshold_only: bool,
     sort: ComplexitySort,
     top: Option<usize>,
+    show_files: bool,
+    density: bool,
     json: bool,
     quiet: bool,
 ) {
@@ -1226,12 +1244,26 @@ fn cmd_complexity(
             .collect::<Vec<_>>(),
         settings.cc_threshold,
     );
+    let nloc_distribution = distribution(
+        &rows
+            .iter()
+            .map(|row| row.function.metrics.nloc)
+            .collect::<Vec<_>>(),
+        settings.nloc_threshold,
+    );
+    // The file axis ranks only: its distribution line never gates functions
+    // (docs/research/code-length-metrics.md §5.1).
+    let file_nloc_distribution = distribution(
+        &report
+            .files
+            .iter()
+            .map(|file| file.nloc)
+            .collect::<Vec<_>>(),
+        settings.file_nloc_threshold,
+    );
 
     if threshold_only {
-        rows.retain(|row| {
-            row.function.metrics.cc > settings.cc_threshold
-                || row.function.metrics.cognitive > settings.cognitive_threshold
-        });
+        rows.retain(|row| !threshold_tags(&row.function.metrics, &settings).is_empty());
     }
     sort_complexity_rows(&mut rows, sort);
 
@@ -1239,7 +1271,13 @@ fn cmd_complexity(
         // Complete by contract: `--top` never truncates JSON.
         println!(
             "{}",
-            complexity_json(&report, &rows, cognitive_distribution, cc_distribution,)
+            complexity_json(
+                &report,
+                &rows,
+                cognitive_distribution,
+                cc_distribution,
+                nloc_distribution,
+            )
         );
         return;
     }
@@ -1267,6 +1305,20 @@ fn cmd_complexity(
         "{}",
         distribution_line("cc", cc_distribution, settings.cc_threshold)
     );
+    println!(
+        "{}",
+        distribution_line("nloc", nloc_distribution, settings.nloc_threshold)
+    );
+    if show_files {
+        println!(
+            "{}",
+            distribution_line(
+                "file nloc",
+                file_nloc_distribution,
+                settings.file_nloc_threshold
+            )
+        );
+    }
 
     if quiet {
         return;
@@ -1274,6 +1326,9 @@ fn cmd_complexity(
     if rows.is_empty() {
         println!();
         println!("no functions above the thresholds");
+        if show_files {
+            print_files_table(&report, all, top.unwrap_or(settings.top));
+        }
         return;
     }
 
@@ -1292,26 +1347,128 @@ fn cmd_complexity(
 
     println!();
     println!("{}", style(format!("{heading}:")).bold());
+    let density_head = if density {
+        format!("{:>7} ", "density")
+    } else {
+        String::new()
+    };
+    let flags_head = if threshold_only {
+        format!("{:<10} ", "flags")
+    } else {
+        String::new()
+    };
     println!(
         "{}",
         style(format!(
-            "{:>8} {:>5} {:>6} {:>7} {:>8}  location",
-            "cog", "cc", "nloc", "params", "nesting"
+            "{:>8} {:>5} {:>6} {}{:>7} {:>8} {} location",
+            "cog", "cc", "nloc", density_head, "params", "nesting", flags_head
         ))
         .dim()
     );
     for row in rows.iter().take(shown) {
         let metrics = row.function.metrics;
+        let density_cell = if density {
+            format!("{:>7.2} ", density_value(metrics.cc, metrics.nloc))
+        } else {
+            String::new()
+        };
+        let flags_cell = if threshold_only {
+            let tags = threshold_tags(&row.function.metrics, &settings).join(",");
+            format!("{tags:<10} ")
+        } else {
+            String::new()
+        };
         println!(
-            "{:>8} {:>5} {:>6} {:>7} {:>8}  {}:{}  {}",
+            "{:>8} {:>5} {:>6} {}{:>7} {:>8} {} {}:{}  {}",
             metrics.cognitive,
             metrics.cc,
             metrics.nloc,
+            density_cell,
             metrics.params,
             metrics.max_nesting,
+            flags_cell,
             row.path,
             row.function.start_line,
             row.function.qualified_name,
+        );
+    }
+
+    if show_files {
+        print_files_table(&report, all, top.unwrap_or(settings.top));
+    }
+}
+
+/// Axis tags of a function over threshold, in fixed order; empty when clean.
+///
+/// `--threshold` is the union of three independent rules, and the tags make
+/// "why is this listed" readable instead of hiding in a black-box score.
+fn threshold_tags(
+    metrics: &qingluan_complexity::Metrics,
+    settings: &qingluan_config::ComplexityConfig,
+) -> Vec<&'static str> {
+    let mut tags = Vec::new();
+    if metrics.cognitive > settings.cognitive_threshold {
+        tags.push("cog");
+    }
+    if metrics.cc > settings.cc_threshold {
+        tags.push("cc");
+    }
+    if metrics.nloc > settings.nloc_threshold {
+        tags.push("len");
+    }
+    tags
+}
+
+/// cc per nloc (cyclomatic density, Gill & Kemerer 1991), display only.
+fn density_value(cc: u32, nloc: u32) -> f64 {
+    if nloc == 0 {
+        0.0
+    } else {
+        f64::from(cc) / f64::from(nloc)
+    }
+}
+
+/// The `--files` table: longest files first, module organization in view.
+///
+/// File nloc is a ranking, never a gate, so this table always shows the top
+/// of the distribution rather than a violation list.
+fn print_files_table(report: &ScanReport, all: bool, top: usize) {
+    let mut files: Vec<(String, &qingluan_complexity::FileComplexity)> = report
+        .files
+        .iter()
+        .map(|file| {
+            (
+                qingluan_complexity::scan::relative_path(&report.root, &file.path),
+                file,
+            )
+        })
+        .collect();
+    files.sort_by(|a, b| b.1.nloc.cmp(&a.1.nloc).then_with(|| a.0.cmp(&b.0)));
+
+    let shown = if all {
+        files.len()
+    } else {
+        top.min(files.len())
+    };
+
+    println!();
+    println!("{}", style("longest files:").bold());
+    println!(
+        "{}",
+        style(format!(
+            "{:>7} {:>6} {:>8} {:>8}  path",
+            "nloc", "funcs", "worstCog", "worstCc"
+        ))
+        .dim()
+    );
+    for (path, file) in files.iter().take(shown) {
+        println!(
+            "{:>7} {:>6} {:>8} {:>8}  {}",
+            file.nloc,
+            file.functions.len(),
+            file.worst_cognitive(),
+            file.worst_cc(),
+            path
         );
     }
 }
@@ -1349,6 +1506,8 @@ struct ComplexityReport {
     root: String,
     scanned: ComplexityScanned,
     distribution: ComplexityDistribution,
+    /// File-level axis, ranked by nloc; always complete, like `functions`.
+    files: Vec<ComplexityFile>,
     functions: Vec<ComplexityFunction>,
 }
 
@@ -1365,6 +1524,7 @@ struct ComplexityScanned {
 struct ComplexityDistribution {
     cognitive: Distribution,
     cc: Distribution,
+    nloc: Distribution,
 }
 
 #[derive(Serialize)]
@@ -1375,22 +1535,55 @@ struct ComplexityFunction {
     function: FunctionMetrics,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComplexityFile {
+    path: String,
+    language: String,
+    nloc: u32,
+    /// Number of functions in the file.
+    functions: usize,
+    worst_cognitive: u32,
+    worst_cc: u32,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn complexity_json(
     report: &ScanReport,
     rows: &[ComplexityRow],
     cognitive: Distribution,
     cc: Distribution,
+    nloc: Distribution,
 ) -> String {
+    let mut files: Vec<ComplexityFile> = report
+        .files
+        .iter()
+        .map(|file| ComplexityFile {
+            path: qingluan_complexity::scan::relative_path(&report.root, &file.path),
+            language: file.language.name().to_string(),
+            nloc: file.nloc,
+            functions: file.functions.len(),
+            worst_cognitive: file.worst_cognitive(),
+            worst_cc: file.worst_cc(),
+        })
+        .collect();
+    // Same canonical order as the human `--files` table.
+    files.sort_by(|a, b| b.nloc.cmp(&a.nloc).then_with(|| a.path.cmp(&b.path)));
+
     let payload = ComplexityReport {
-        schema_version: 1,
+        schema_version: 2,
         root: report.root.display().to_string(),
         scanned: ComplexityScanned {
             files: report.files.len(),
             functions: report.function_count(),
             skipped: report.skipped,
         },
-        distribution: ComplexityDistribution { cognitive, cc },
+        distribution: ComplexityDistribution {
+            cognitive,
+            cc,
+            nloc,
+        },
+        files,
         functions: rows
             .iter()
             .map(|row| ComplexityFunction {
@@ -1436,6 +1629,7 @@ mod tests {
             qingluan_complexity::Language::Rust,
             source.as_bytes(),
         )
+        .functions
         .into_iter()
         .next()
         .expect("sample has a function");
@@ -1453,11 +1647,20 @@ mod tests {
         );
         let report = ScanReport {
             root: PathBuf::from("/repo"),
-            files: vec![qingluan_complexity::FileComplexity {
-                path: PathBuf::from("/repo/src/lib.rs"),
-                language: qingluan_complexity::Language::Rust,
-                functions: vec![row.function.clone()],
-            }],
+            files: vec![
+                qingluan_complexity::FileComplexity {
+                    path: PathBuf::from("/repo/src/lib.rs"),
+                    language: qingluan_complexity::Language::Rust,
+                    functions: vec![row.function.clone()],
+                    nloc: 1,
+                },
+                qingluan_complexity::FileComplexity {
+                    path: PathBuf::from("/repo/src/big.rs"),
+                    language: qingluan_complexity::Language::Rust,
+                    functions: Vec::new(),
+                    nloc: 900,
+                },
+            ],
             skipped: qingluan_complexity::SkipStats {
                 generated: 1,
                 unsupported: 2,
@@ -1469,12 +1672,13 @@ mod tests {
             std::slice::from_ref(&row),
             distribution(&[1], 15),
             distribution(&[3], 10),
+            distribution(&[4], 100),
         ))
         .expect("complexity report is JSON");
 
-        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["schemaVersion"], 2);
         assert_eq!(json["root"], "/repo");
-        assert_eq!(json["scanned"]["files"], 1);
+        assert_eq!(json["scanned"]["files"], 2);
         assert_eq!(json["scanned"]["functions"], 1);
         assert_eq!(json["scanned"]["skipped"]["generated"], 1);
         assert_eq!(json["scanned"]["skipped"]["unsupported"], 2);
@@ -1482,12 +1686,59 @@ mod tests {
         assert_eq!(json["distribution"]["cognitive"]["max"], 1);
         assert_eq!(json["distribution"]["cc"]["max"], 3);
         assert_eq!(json["distribution"]["cc"]["overThreshold"], 0);
+        assert_eq!(json["distribution"]["nloc"]["max"], 4);
         assert_eq!(json["functions"][0]["path"], "src/lib.rs");
         assert_eq!(json["functions"][0]["name"], "pick");
         assert_eq!(json["functions"][0]["startLine"], 1);
         assert_eq!(json["functions"][0]["cc"], 3);
         assert_eq!(json["functions"][0]["cognitive"], 3);
         assert_eq!(json["functions"][0]["maxNesting"], 1);
+
+        // The files array ranks by nloc, big first, ties by path.
+        assert_eq!(json["files"].as_array().unwrap().len(), 2);
+        assert_eq!(json["files"][0]["path"], "src/big.rs");
+        assert_eq!(json["files"][0]["nloc"], 900);
+        assert_eq!(json["files"][0]["functions"], 0);
+        assert_eq!(json["files"][0]["worstCognitive"], 0);
+        assert_eq!(json["files"][0]["worstCc"], 0);
+        assert_eq!(json["files"][0]["language"], "rust");
+        assert_eq!(json["files"][1]["path"], "src/lib.rs");
+        assert_eq!(json["files"][1]["worstCc"], 3);
+    }
+
+    #[test]
+    fn threshold_union_lists_length_only_hits_with_a_len_tag() {
+        let settings = qingluan_config::ComplexityConfig::default();
+        let clean = qingluan_complexity::Metrics {
+            cc: 5,
+            cognitive: 5,
+            nloc: 40,
+            ..Default::default()
+        };
+        let long_and_flat = qingluan_complexity::Metrics {
+            cc: 6,
+            cognitive: 6,
+            nloc: 101,
+            ..Default::default()
+        };
+        let tangled = qingluan_complexity::Metrics {
+            cc: 11,
+            cognitive: 9,
+            nloc: 20,
+            ..Default::default()
+        };
+
+        assert!(threshold_tags(&clean, &settings).is_empty());
+        // Length is structurally invisible to cc/cognitive: it must be its
+        // own rule in the union.
+        assert_eq!(threshold_tags(&long_and_flat, &settings), vec!["len"]);
+        assert_eq!(threshold_tags(&tangled, &settings), vec!["cc"]);
+    }
+
+    #[test]
+    fn density_column_derives_cc_per_nloc() {
+        assert!((density_value(20, 100) - 0.2).abs() < 1e-9);
+        assert_eq!(density_value(20, 0), 0.0);
     }
 
     fn ranked_row(path: &str, line: usize, cc: u32) -> ComplexityRow {

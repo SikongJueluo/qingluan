@@ -55,6 +55,13 @@ top = 10
 # A function counts as over threshold above these (Sonar S1541 / S3776).
 cc_threshold = 10
 cognitive_threshold = 15
+# Function length above this joins the threshold union. A convention, not an
+# empirical finding: Clippy's too_many_lines defaults to 100 and counts the
+# same non-blank non-comment lines as we do.
+nloc_threshold = 100
+# File length above this is flagged in the --files ranking (Sonar S104 / pylint
+# defaults). The file axis ranks, it never gates functions.
+file_nloc_threshold = 1000
 # Extra exclude globs, on top of the built-in generated/vendor list.
 # exclude = ["**/fixtures/**"]
 # Include globs; empty means every file with a bundled grammar.

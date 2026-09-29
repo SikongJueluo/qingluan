@@ -153,6 +153,14 @@ pub struct ComplexityConfig {
     /// Cognitive complexity above this counts as over threshold
     /// (Sonar S3776 default).
     pub cognitive_threshold: u32,
+    /// Function nloc above this counts as over threshold. A convention, not
+    /// an empirical finding: it matches Clippy's `too_many_lines` default,
+    /// which counts exactly the same non-blank non-comment lines.
+    pub nloc_threshold: u32,
+    /// File nloc above this is flagged in the `--files` table. A convention:
+    /// Sonar S104 defaults to 1000 in 8 of 10 languages and so does pylint.
+    /// The file axis ranks, it never gates functions.
+    pub file_nloc_threshold: u32,
     /// Extra exclude globs, on top of the built-in generated/vendor list.
     pub exclude: Vec<String>,
     /// Include globs. Empty means every file with a known grammar.
@@ -165,6 +173,8 @@ impl Default for ComplexityConfig {
             top: 10,
             cc_threshold: 10,
             cognitive_threshold: 15,
+            nloc_threshold: 100,
+            file_nloc_threshold: 1000,
             exclude: Vec::new(),
             include: Vec::new(),
         }
@@ -259,12 +269,15 @@ mod tests {
         assert_eq!(defaults.complexity.top, 10);
         assert_eq!(defaults.complexity.cc_threshold, 10);
         assert_eq!(defaults.complexity.cognitive_threshold, 15);
+        assert_eq!(defaults.complexity.nloc_threshold, 100);
+        assert_eq!(defaults.complexity.file_nloc_threshold, 1000);
         assert!(defaults.complexity.exclude.is_empty());
 
         let config = load_both(
             r#"[complexity]
 top = 5
 cognitive_threshold = 20
+nloc_threshold = 60
 exclude = ["**/fixtures/**"]
 "#,
             "",
@@ -273,6 +286,8 @@ exclude = ["**/fixtures/**"]
         assert_eq!(config.complexity.top, 5);
         assert_eq!(config.complexity.cc_threshold, 10);
         assert_eq!(config.complexity.cognitive_threshold, 20);
+        assert_eq!(config.complexity.nloc_threshold, 60);
+        assert_eq!(config.complexity.file_nloc_threshold, 1000);
         assert_eq!(config.complexity.exclude, vec!["**/fixtures/**"]);
     }
 

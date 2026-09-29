@@ -173,7 +173,7 @@ mod tests {
     use crate::{Language, analyze_source};
 
     fn functions(source: &str) -> Vec<crate::FunctionMetrics> {
-        analyze_source(Language::Go, source.as_bytes())
+        analyze_source(Language::Go, source.as_bytes()).functions
     }
 
     #[test]

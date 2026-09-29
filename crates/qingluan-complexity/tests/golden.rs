@@ -9,7 +9,7 @@
 use qingluan_complexity::{Language, analyze_source};
 
 fn functions(language: Language, source: &str) -> Vec<qingluan_complexity::FunctionMetrics> {
-    analyze_source(language, source.as_bytes())
+    analyze_source(language, source.as_bytes()).functions
 }
 
 /// §1.4: six decision points, so CC1 = 7.
@@ -252,4 +252,14 @@ fn broken_syntax_still_recovers_and_never_panics() {
     assert!(!found.is_empty());
     assert!(found[0].metrics.cc >= 1);
     assert!(found[0].metrics.nloc >= 1);
+}
+
+#[test]
+fn file_nloc_uses_the_same_rules_over_the_whole_buffer() {
+    let source = "// header\n\nfn a() { let x = 1; }\n\nstruct S;\n/* spans\n   lines */\nfn b() { let y = 2; }\n";
+    let analysis = analyze_source(Language::Rust, source.as_bytes());
+    // The two function lines plus one code line outside any function; the
+    // header comment, block comment and blanks never count.
+    assert_eq!(analysis.nloc, 3);
+    assert_eq!(analysis.functions.len(), 2);
 }

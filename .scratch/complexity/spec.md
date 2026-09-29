@@ -22,8 +22,10 @@ v1 只在单次运行内用行号区间定位函数，不承诺任何跨运行�
 ```bash
 qingluan complexity [PATH...]          # 体检：摘要 + top-K（默认）
 qingluan complexity --all              # 全部函数（按 --sort 排序）
-qingluan complexity --threshold        # 只列超阈值的函数
+qingluan complexity --threshold        # 只列超阈值的函数（cc/cognitive/nloc 并集）
 qingluan complexity --sort cognitive   # cc | cognitive | nloc（默认 cognitive）
+qingluan complexity --files            # 附「最长文件」榜（file nloc 只排名不拦截）
+qingluan complexity --density          # 可选派生列 cc/nloc（只展示，不作判定）
 qingluan complexity --json             # 机器可读，全量不截断
 qingluan complexity --quiet            # 只出摘要统计，不出列表
 
@@ -43,6 +45,7 @@ scanned 412 files, 3187 functions (skipped 38: 21 generated, 9 unsupported, 8 to
 
 cognitive  p50 2   p90  8   p99 19   max 61   >15: 96
 cc         p50 3   p90 11   p99 24   max 87   >10: 214
+nloc       p50 7   p90 29   p99 94   max 1132 >100: 160
 
 worst by cognitive:
   cog  cc  nloc  params  nesting  location
@@ -61,14 +64,19 @@ JSON 形状（`schemaVersion` 用于后续演进）：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "root": "/abs/path",
   "scanned": { "files": 412, "functions": 3187,
                "skipped": { "generated": 21, "unsupported": 9, "tooLarge": 8 } },
   "distribution": {
     "cognitive": { "p50": 2, "p90": 8, "p99": 19, "max": 61, "overThreshold": 96 },
-    "cc":        { "p50": 3, "p90": 11, "p99": 24, "max": 87, "overThreshold": 214 }
+    "cc":        { "p50": 3, "p90": 11, "p99": 24, "max": 87, "overThreshold": 214 },
+    "nloc":      { "p50": 7, "p90": 29, "p99": 94, "max": 1132, "overThreshold": 160 }
   },
+  "files": [
+    { "path": "crates/x/src/big.rs", "language": "rust", "nloc": 2085,
+      "functions": 86, "worstCognitive": 31, "worstCc": 24 }
+  ],
   "functions": [
     { "path": "crates/qingluan-daemon/src/router.rs", "startLine": 214, "endLine": 318,
       "name": "handle_request", "qualifiedName": "Router::handle_request",
@@ -89,7 +97,10 @@ JSON 形状（`schemaVersion` 用于后续演进）：
 | `nloc` / `params` / `maxNesting` | 遍历时顺带统计 |
 | 函数边界 | 嵌套函数/闭包**计入外层**（与 Sonar/ESLint 一致，写死）；无函数的脚本给文件级兜底 |
 
-阈值默认：`cc > 10`、`cognitive > 15`（Sonar S1541 / S3776），可配置。
+阈值默认：`cc > 10`、`cognitive > 15`（Sonar S1541 / S3776）、函数 `nloc > 100`
+（Clippy `too_many_lines` 同口径默认）、文件 `nloc > 1000`（Sonar S104 多数语言默认；
+文件轴只排名不拦截），均可配置。长度轴的依据与「为什么不做复合分」见
+`docs/research/code-length-metrics.md`。
 
 ## 扫描与排除
 
@@ -99,7 +110,7 @@ JSON 形状（`schemaVersion` 用于后续演进）：
 - 默认排除：`target/`、`node_modules/`、vendor 目录、常见生成物（`*.min.js`、`*_pb2.py`、`.pb.go`、lockfile 等）
 - 体积上限：单文件超过阈值（如 1 MiB）跳过并计入 `tooLarge`
 - 只分析有 grammar 的语言；无 grammar 的计入 `unsupported`（不静默丢）
-- 配置面（`qingluan.toml`，经 qingluan-config 四层合并）：`[complexity] top / cc_threshold / cognitive_threshold / exclude / include`
+- 配置面（`qingluan.toml`，经 qingluan-config 四层合并）：`[complexity] top / cc_threshold / cognitive_threshold / nloc_threshold / file_nloc_threshold / exclude / include`
 
 ## 架构
 
@@ -154,9 +165,21 @@ daemon 后续复用同一 crate 给 review UI 打复杂度标（`GET /reviews/<i
    计入 `unsupported`（可见而非静默）。要覆盖得做「抽 script 块 + 行号偏移」，
    不在本期范围。
 
-## 后续（2026-09-30 调研，未实现）
+## 长度轴（2026-09-30 调研，issue 07 已实现）
 
-长度轴（函数长度 / 文件长度）的调研已完成：`docs/research/code-length-metrics.md`。
-结论是**作为独立轴纳入、不折进 cc/cognitive**；建议阈值 `nloc > 100`（函数）、
-`nloc > 1000`（文件，只排名不拦截），`--threshold` 取三条规则的并集。
+调研：`docs/research/code-length-metrics.md`。结论：**作为独立轴纳入、不折进
+cc/cognitive**；阈值 `nloc > 100`（函数，Clippy `too_many_lines` 同口径默认）、
+`nloc > 1000`（文件，Sonar S104 多数语言默认），两者都是**约定**而非实证发现。
+已实现（细节见 `issues/07` 的 Comments）：
+
+- `--threshold` = cc ∪ cognitive ∪ 函数 nloc **三规则并集**，`flags` 列标出命中轴
+  （`cog`/`cc`/`len`），只在 `--threshold` 模式显示；
+- `--files` 文件榜（`nloc / funcs / worstCog / worstCc / path`，nloc desc → path asc，
+  行数同 `top`，`--all` 全量）+ `file nloc` 分布行；文件轴**只排名不拦截**；
+- `--density` 可选派生列 cc/nloc（cyclomatic density，Gill & Kemerer 1991），
+  只展示、不进判定、不进 JSON，默认关；
+- JSON `schemaVersion` 升到 2：`distribution` 增 `nloc`，新增顶层 `files` 数组
+  （全量，nloc desc → path asc）。
+
+可见行为变化：默认 `--threshold` 的命中数从两规则变三规则并集（本仓实测 66）。
 本 spec 其余部分（v1 的口径与实现顺序）不变。
