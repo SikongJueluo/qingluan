@@ -1,0 +1,93 @@
+functions 18573 in 2073 files, 28 repos
+languages: {'python': 4184, 'java': 10572, 'typescript': 1940, '?': 76, 'javascript': 41, 'rust': 1755, 'tsx': 5}
+
+== function nloc ==
+  p50: 7  p75: 15  p90: 29  p95: 42  p99: 94  p99.9: 314
+  max 1132  mean 13.3
+  >  40:  1014 ( 5.46%)
+  >  50:   648 ( 3.49%)
+  >  60:   437 ( 2.35%)
+  >  80:   248 ( 1.34%)
+  > 100:   160 ( 0.86%)
+  > 150:    68 ( 0.37%)
+  > 200:    40 ( 0.22%)
+  > 300:    20 ( 0.11%)
+
+== file nloc ==
+  p50: 61  p75: 161  p90: 335  p95: 513  p99: 1042  p99.9: 2278
+  max 7587  mean 141.3
+  >  200:   414 (19.97%)
+  >  300:   241 (11.63%)
+  >  500:   110 ( 5.31%)
+  >  750:    48 ( 2.32%)
+  > 1000:    25 ( 1.21%)
+  > 2000:     4 ( 0.19%)
+
+== length vs complexity ==
+  spearman(nloc, cognitive)      0.567
+  spearman(nloc, cc)             0.564
+  spearman(cc, cognitive)        0.994
+  long and flat   (nloc>80, cc<=10): 97
+  short and hairy (nloc<=40, cc>10): 193
+  spearman(file nloc, worst cognitive in file) 0.689
+
+== does file length add anything? ==
+  files >  300: 241  already flagged by a function metric 135 ( 56.0%)  silently long 106
+  files >  500: 110  already flagged by a function metric  72 ( 65.5%)  silently long  38
+  files >  750:  48  already flagged by a function metric  37 ( 77.1%)  silently long  11
+  files > 1000:  25  already flagged by a function metric  20 ( 80.0%)  silently long   5
+
+== test vs production ==
+  functions, non-test  n=12299 p90  29 p95  42 p99   99  >80  1.44%
+  functions, tests     n= 6274 p90  31 p95  43 p99   87  >80  1.13%
+  files, non-test      n= 1560 p50   50 p90  290  >750  26
+  files, tests         n=  513 p50  121 p90  484  >750  22
+
+== per language: function nloc ==
+  ?            n=   76 p50   1 p90  12 p95  22 p99   35  >80  0.00%
+  java         n=10572 p50   5 p90  22 p95  31 p99   65  >80  0.64%
+  python       n= 4184 p50  10 p90  33 p95  49 p99  104  >80  1.74%
+  rust         n= 1755 p50  11 p90  41 p95  59 p99  117  >80  2.39%
+  typescript   n= 1940 p50  11 p90  43 p95  61 p99  177  >80  3.14%
+
+== per repo (>=200 functions) ==
+  BaseUI               n= 7750 p90   20 p99   57 max  302  >50  1.33%  >80  0.48%
+  Hi3863_SmartCar      n= 1856 p90   30 p99   64 max  218  >50  1.99%  >80  0.54%
+  qingluan             n= 1824 p90   43 p99  121 max  389  >50  7.35%  >80  2.47%
+  Mini-Nav             n= 1650 p90   37 p99  111 max  175  >50  6.36%  >80  2.42%
+  hfc-core             n= 1000 p90   22 p99   57 max  133  >50  1.70%  >80  0.60%
+  PlayerSync_hfc       n=  833 p90   41 p99  124 max  561  >50  6.60%  >80  2.88%
+  Buddycards-Core      n=  626 p90   18 p99   50 max 1132  >50  0.96%  >80  0.16%
+  FPGA_WebLab          n=  471 p90   37 p99  264 max  588  >50  2.34%  >80  1.27%
+  cc-utils             n=  417 p90   34 p99  142 max 1042  >50  5.04%  >80  2.16%
+  dsh-extensions       n=  298 p90   28 p99  266 max  430  >50  5.37%  >80  2.68%
+  MG-Nav               n=  287 p90   57 p99  290 max  382  >50 13.24%  >80  6.27%
+  mojiang              n=  264 p90   57 p99  213 max  481  >50 12.12%  >80  6.82%
+  pi-extensions        n=  245 p90   67 p99  365 max  386  >50 15.92%  >80  6.94%
+  SiYi                 n=  238 p90   23 p99   61 max   88  >50  1.26%  >80  0.42%
+  jjunction            n=  202 p90   32 p99   89 max  177  >50  5.45%  >80  1.49%
+  SugarRushBurger-1.20.1-forge n=  201 p90   17 p99   41 max   64  >50  0.50%  >80  0.00%
+
+== worst functions by nloc (top 10) ==
+  nloc 1132 cc 250 cog 573  Buddycards-Core/src/main/java/com/wildcard/buddycards/registries/BuddycardsItems.java
+  nloc 1042 cc   1 cog   0  cc-utils/types/craftos/index.d.ts
+  nloc  588 cc  78 cog 168  FPGA_WebLab/src/components/LabCanvas/composable/componentManager.ts
+  nloc  573 cc  43 cog  93  cc-utils/src/accesscontrol/tui.ts
+  nloc  561 cc  91 cog 192  PlayerSync_hfc/src/main/java/vip/fubuki/playersync/sync/ShutdownCoordinator.java
+  nloc  520 cc  68 cog 150  FPGA_WebLab/src/components/LogicAnalyzer/LogicAnalyzerManager.ts
+  nloc  491 cc  34 cog  68  FPGA_WebLab/src/views/User/BoardTableManager.ts
+  nloc  481 cc   1 cog   0  mojiang/crates/schema/tests/roundtrip.rs
+  nloc  430 cc  87 cog 241  dsh-extensions/packages/handoff/client/client.js
+  nloc  401 cc  24 cog  70  kubejs-utils/src/server_scripts/areacontrol.js
+
+== longest files (top 10) ==
+  nloc  7587 functions  331 worst cog  32 worst cc  21  FPGA_WebLab/src/APIClient.ts
+  nloc  2697 functions   93 worst cog 130 worst cc  64  MG-Nav/place_graph_builder_obs.py
+  nloc  2278 functions   65 worst cog  43 worst cc  36  PlayerSync_hfc/src/main/java/vip/fubuki/playersync/database/TransferRequestRepository.java
+  nloc  2085 functions   86 worst cog  31 worst cc  24  qingluan/crates/qingluan-terminal/src/terminal.rs
+  nloc  1813 functions   58 worst cog  48 worst cc  24  PlayerSync_hfc/src/main/java/vip/fubuki/playersync/sync/TransferRequestPoller.java
+  nloc  1748 functions   25 worst cog  73 worst cc  39  BaseUI/core/src/test/java/net/burgerfarm/baseuilib/client/layouts/core/LinearLayoutOwnerIntegrationTest.java
+  nloc  1655 functions   78 worst cog  51 worst cc  29  PlayerSync_hfc/src/main/java/vip/fubuki/playersync/sync/PlayerSnapshotService.java
+  nloc  1523 functions   61 worst cog   9 worst cc  12  qingluan/crates/qingluan-terminal/tests/runtime.rs
+  nloc  1508 functions   32 worst cog  29 worst cc  19  qingluan/crates/qingluan-storage/tests/writer_ownership.rs
+  nloc  1507 functions  107 worst cog  28 worst cc  14  Hi3863_SmartCar/doc/hi3861_hdu_iot_application/src/test/xdevice/extension/src/xdevice_extension/_core/driver/drivers.py

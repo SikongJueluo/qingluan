@@ -153,3 +153,10 @@ daemon 后续复用同一 crate 给 review UI 打复杂度标（`GET /reviews/<i
 3. **`<script>` 型文件仍算 unsupported**：本仓 `apps/web` 有 111 个 `.vue`，会全部
    计入 `unsupported`（可见而非静默）。要覆盖得做「抽 script 块 + 行号偏移」，
    不在本期范围。
+
+## 后续（2026-09-30 调研，未实现）
+
+长度轴（函数长度 / 文件长度）的调研已完成：`docs/research/code-length-metrics.md`。
+结论是**作为独立轴纳入、不折进 cc/cognitive**；建议阈值 `nloc > 100`（函数）、
+`nloc > 1000`（文件，只排名不拦截），`--threshold` 取三条规则的并集。
+本 spec 其余部分（v1 的口径与实现顺序）不变。
