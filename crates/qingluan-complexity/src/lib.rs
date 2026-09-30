@@ -34,8 +34,13 @@ use serde::Serialize;
 mod kernel;
 mod langs;
 
+pub mod deps;
+
 pub mod scan;
 
+pub use deps::{
+    ChurnEntry, Cycle, DepsReport, FileDeps, Hotspot, LanguageDeps, analyze_deps, hotspots,
+};
 pub use scan::{FileComplexity, ScanOptions, ScanReport, SkipStats, scan};
 
 /// Source languages with a bundled grammar.

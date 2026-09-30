@@ -6,7 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use console::{Alignment, Style, Term, measure_text_width, pad_str, style, truncate_str};
 use dialoguer::{Confirm, FuzzySelect, Input, theme::ColorfulTheme};
-use qingluan_complexity::{Distribution, FunctionMetrics, ScanReport, distribution};
+use qingluan_complexity::{
+    DepsReport, Distribution, FileDeps, FunctionMetrics, Hotspot, ScanReport, distribution,
+    hotspots,
+};
 use qingluan_core::workspace::{
     SessionSummary, WorkspaceCatalog, WorkspaceSummary, add_workspace, discover, forget_workspace,
     jj_root, list_jj_workspaces, parse_iso8601_ms, workspace_clean,
@@ -14,6 +17,8 @@ use qingluan_core::workspace::{
 use qingluan_protocol::{ApiResponse, HealthResponse};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+
+mod churn;
 
 /// Qingluan CLI — stable agent entry point for the Qingluan task platform.
 ///
@@ -108,6 +113,39 @@ enum Commands {
         json: bool,
 
         /// Print only the summary and distribution lines.
+        #[arg(long)]
+        quiet: bool,
+    },
+
+    /// Dependency and coupling report (local; whole-repo import graph).
+    ///
+    /// Cycles are the one coupling judgement reported as a violation: a
+    /// non-zero exit means the resolved import graph has a strongly
+    /// connected component. fan-in / fan-out / instability are display
+    /// only — high fan-in is a stability signal, not a defect.
+    Deps {
+        /// Files or directories to scan (default: the current directory).
+        paths: Vec<PathBuf>,
+
+        /// Rows in the fan-in table (config: complexity.top).
+        #[arg(long)]
+        top: Option<usize>,
+
+        /// Minimum fan-in for the churn hotspot list.
+        #[arg(long, default_value_t = 3)]
+        min_fanin: u32,
+
+        /// Read VCS history (git, else jj) and add the fan-in × churn
+        /// hotspot table. Off by default: it spawns VCS processes.
+        #[arg(long)]
+        churn: bool,
+
+        /// Machine-readable JSON on stdout; always complete, never
+        /// truncated. Still exits non-zero on cycles.
+        #[arg(long)]
+        json: bool,
+
+        /// Print only the summary and the cycle list.
         #[arg(long)]
         quiet: bool,
     },
@@ -284,6 +322,14 @@ async fn main() {
         } => cmd_complexity(
             &paths, all, threshold, sort, top, files, density, json, quiet,
         ),
+        Commands::Deps {
+            paths,
+            top,
+            min_fanin,
+            churn,
+            json,
+            quiet,
+        } => cmd_deps(&paths, top, min_fanin, churn, json, quiet),
         Commands::Daemon { action } => {
             // Same hard-fail semantics the daemon binary used to have:
             // malformed config must abort startup, never fall back.
@@ -1595,6 +1641,315 @@ fn complexity_json(
     serde_json::to_string(&payload).expect("complexity report is serializable")
 }
 
+/// `qingluan deps [PATH...]`: the whole-repo import graph.
+///
+/// Cycles are the violation: every tool that dares fail a build over
+/// coupling fails it over cycles (ADP + tool consensus,
+/// `docs/research/coupling-as-complexity.md` §4), so they own the exit
+/// code. Everything else — fan-in, fan-out, instability — ranks and
+/// displays, never gates: high fan-in is the primary sources' definition of
+/// a *stable* abstraction, and ours is a lower bound besides.
+fn cmd_deps(
+    paths: &[PathBuf],
+    top: Option<usize>,
+    min_fanin: u32,
+    with_churn: bool,
+    json: bool,
+    quiet: bool,
+) {
+    let config = qingluan_config::load().unwrap_or_else(|e| machine_error("config_invalid", e));
+    let settings = config.complexity;
+
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut options = qingluan_complexity::ScanOptions::new(&root);
+    if !paths.is_empty() {
+        options.paths = paths.to_vec();
+    }
+    options.include = settings.include.clone();
+    options.exclude = settings.exclude.clone();
+
+    let report = qingluan_complexity::analyze_deps(&options).unwrap_or_else(|error| {
+        let code = match error.kind() {
+            std::io::ErrorKind::NotFound => "path_not_found",
+            std::io::ErrorKind::InvalidInput => "invalid_glob",
+            _ => "scan_failed",
+        };
+        machine_error(code, error);
+    });
+    if report.files.is_empty() {
+        machine_error(
+            "no_files",
+            format!("no analyzable files under {}", report.root.display()),
+        );
+    }
+
+    let hotspots = if with_churn {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let history =
+            churn::read(&report.root).unwrap_or_else(|error| machine_error("churn_failed", error));
+        hotspots(&report, &history, now, min_fanin)
+    } else {
+        Vec::new()
+    };
+
+    if json {
+        println!("{}", deps_json(&report, &hotspots, with_churn));
+    } else {
+        print_deps_summary(&report);
+        print_deps_cycles(&report);
+        if !quiet {
+            print_deps_fan_table(&report, top.unwrap_or(settings.top));
+            if with_churn {
+                print_deps_hotspots(&report, &hotspots, min_fanin);
+            }
+        }
+    }
+
+    if !report.cycles.is_empty() {
+        // The one gate in the whole complexity surface: cycles fail builds
+        // in every comparable tool (madge exit 1, dependency-cruiser error,
+        // ArchUnit beFreeOfCycles), and a report nobody can gate on is a
+        // report CI ignores.
+        std::process::exit(1);
+    }
+}
+
+fn print_deps_summary(report: &DepsReport) {
+    println!(
+        "scanned {} files in {} languages",
+        report.files.len(),
+        report.languages.len()
+    );
+    println!();
+    println!(
+        "{}",
+        style("resolution (resolved / external / unresolved specifiers):").bold()
+    );
+    for stats in &report.languages {
+        println!(
+            "  {:<10} {:>3} files  {:>5} specifiers  {:>5} resolved  {:>5} external  {:>3} unresolved  {:>3.0}% accounted",
+            stats.language.name(),
+            stats.files,
+            stats.specifiers(),
+            stats.resolved,
+            stats.external,
+            stats.unresolved,
+            stats.resolution_rate() * 100.0,
+        );
+    }
+}
+
+fn print_deps_cycles(report: &DepsReport) {
+    println!();
+    if report.cycles.is_empty() {
+        println!("{}", style("no dependency cycles").bold());
+        return;
+    }
+    println!(
+        "{}",
+        style(format!(
+            "{} cycles (cross-directory first):",
+            report.cycles.len()
+        ))
+        .bold()
+    );
+    for cycle in &report.cycles {
+        let scope = if cycle.cross_directory {
+            "cross-directory"
+        } else {
+            "single directory"
+        };
+        println!("  cycle of {} files ({scope}):", cycle.files.len(),);
+        for file in &cycle.files {
+            println!(
+                "    {}",
+                qingluan_complexity::scan::relative_path(&report.root, file)
+            );
+        }
+    }
+}
+
+/// The fan-in table: ranking only, never a gate.
+fn print_deps_fan_table(report: &DepsReport, top: usize) {
+    println!();
+    println!(
+        "{}",
+        style("most depended-upon files (fan-in is a lower bound; high fan-in usually means a stable abstraction):").bold()
+    );
+    let mut files: Vec<&FileDeps> = report.files.iter().collect();
+    files.sort_by(|a, b| b.fan_in.cmp(&a.fan_in).then_with(|| a.path.cmp(&b.path)));
+    println!(
+        "{}",
+        style(format!("{:>6} {:>6} {:>6}  path", "fanIn", "fanOut", "I")).dim()
+    );
+    for file in files.into_iter().take(top) {
+        println!(
+            "{:>6} {:>6} {:>6.2}  {}",
+            file.fan_in,
+            file.fan_out,
+            file.instability,
+            qingluan_complexity::scan::relative_path(&report.root, &file.path),
+        );
+    }
+}
+
+fn print_deps_hotspots(report: &DepsReport, hotspots: &[Hotspot], min_fanin: u32) {
+    println!();
+    println!(
+        "{}",
+        style(format!(
+            "fan-in × churn hotspots (fanIn ≥ {min_fanin}, change rate in top decile):"
+        ))
+        .bold()
+    );
+    if hotspots.is_empty() {
+        println!("  none — no file combines wide fan-in with a top-decile change rate");
+        return;
+    }
+    println!(
+        "{}",
+        style(format!(
+            "{:>6} {:>8} {:>8}  path",
+            "fanIn", "commits", "rate/mo"
+        ))
+        .dim()
+    );
+    for hotspot in hotspots {
+        println!(
+            "{:>6} {:>8} {:>8.2}  {}",
+            hotspot.fan_in,
+            hotspot.commits,
+            hotspot.rate_per_month,
+            qingluan_complexity::scan::relative_path(&report.root, &hotspot.path),
+        );
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepsJson {
+    schema_version: u32,
+    root: String,
+    scanned: DepsScanned,
+    cycles: Vec<DepsCycle>,
+    /// Every scanned file, fanIn desc → path asc. Complete by contract.
+    files: Vec<DepsFile>,
+    /// Present only when churn was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hotspots: Option<Vec<DepsHotspot>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepsScanned {
+    files: usize,
+    languages: Vec<DepsLanguage>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepsLanguage {
+    language: String,
+    files: u32,
+    resolved: u32,
+    external: u32,
+    unresolved: u32,
+    /// (resolved + external) / specifiers, 0–1.
+    resolution_rate: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepsCycle {
+    size: usize,
+    cross_directory: bool,
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepsFile {
+    path: String,
+    language: String,
+    fan_in: u32,
+    fan_out: u32,
+    instability: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepsHotspot {
+    path: String,
+    fan_in: u32,
+    commits: u32,
+    rate_per_month: f64,
+}
+
+fn deps_json(report: &DepsReport, hotspots: &[Hotspot], with_churn: bool) -> String {
+    let mut files: Vec<DepsFile> = report
+        .files
+        .iter()
+        .map(|file| DepsFile {
+            path: qingluan_complexity::scan::relative_path(&report.root, &file.path),
+            language: file.language.name().to_string(),
+            fan_in: file.fan_in,
+            fan_out: file.fan_out,
+            instability: file.instability,
+        })
+        .collect();
+    // Same canonical order as the human table.
+    files.sort_by(|a, b| b.fan_in.cmp(&a.fan_in).then_with(|| a.path.cmp(&b.path)));
+
+    let payload = DepsJson {
+        schema_version: 1,
+        root: report.root.display().to_string(),
+        scanned: DepsScanned {
+            files: report.files.len(),
+            languages: report
+                .languages
+                .iter()
+                .map(|stats| DepsLanguage {
+                    language: stats.language.name().to_string(),
+                    files: stats.files,
+                    resolved: stats.resolved,
+                    external: stats.external,
+                    unresolved: stats.unresolved,
+                    resolution_rate: stats.resolution_rate(),
+                })
+                .collect(),
+        },
+        cycles: report
+            .cycles
+            .iter()
+            .map(|cycle| DepsCycle {
+                size: cycle.files.len(),
+                cross_directory: cycle.cross_directory,
+                files: cycle
+                    .files
+                    .iter()
+                    .map(|file| qingluan_complexity::scan::relative_path(&report.root, file))
+                    .collect(),
+            })
+            .collect(),
+        files,
+        hotspots: with_churn.then(|| {
+            hotspots
+                .iter()
+                .map(|hotspot| DepsHotspot {
+                    path: qingluan_complexity::scan::relative_path(&report.root, &hotspot.path),
+                    fan_in: hotspot.fan_in,
+                    commits: hotspot.commits,
+                    rate_per_month: hotspot.rate_per_month,
+                })
+                .collect()
+        }),
+    };
+    serde_json::to_string(&payload).expect("deps report is serializable")
+}
+
 async fn cmd_health(daemon_url: &str) {
     let client = Client::new();
     match client.get(format!("{}/health", daemon_url)).send().await {
@@ -1704,6 +2059,75 @@ mod tests {
         assert_eq!(json["files"][0]["language"], "rust");
         assert_eq!(json["files"][1]["path"], "src/lib.rs");
         assert_eq!(json["files"][1]["worstCc"], 3);
+    }
+
+    #[test]
+    fn deps_json_matches_the_documented_shape() {
+        let report = DepsReport {
+            root: PathBuf::from("/repo"),
+            files: vec![
+                FileDeps {
+                    path: PathBuf::from("/repo/src/leaf.rs"),
+                    language: qingluan_complexity::Language::Rust,
+                    fan_in: 4,
+                    fan_out: 0,
+                    instability: 0.0,
+                },
+                FileDeps {
+                    path: PathBuf::from("/repo/src/user.rs"),
+                    language: qingluan_complexity::Language::Rust,
+                    fan_in: 4,
+                    fan_out: 4,
+                    instability: 0.5,
+                },
+            ],
+            languages: vec![qingluan_complexity::LanguageDeps {
+                language: qingluan_complexity::Language::Rust,
+                files: 2,
+                resolved: 3,
+                external: 1,
+                unresolved: 0,
+            }],
+            cycles: vec![qingluan_complexity::Cycle::new(vec![
+                PathBuf::from("/repo/src/a/x.rs"),
+                PathBuf::from("/repo/src/b/y.rs"),
+            ])],
+        };
+        let hot = [Hotspot {
+            path: PathBuf::from("/repo/src/leaf.rs"),
+            fan_in: 4,
+            commits: 9,
+            rate_per_month: 1.5,
+        }];
+
+        let json: serde_json::Value =
+            serde_json::from_str(&deps_json(&report, &hot, true)).expect("deps report is JSON");
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["root"], "/repo");
+        assert_eq!(json["scanned"]["files"], 2);
+        assert_eq!(json["scanned"]["languages"][0]["language"], "rust");
+        assert_eq!(json["scanned"]["languages"][0]["resolved"], 3);
+        assert_eq!(json["scanned"]["languages"][0]["external"], 1);
+        assert_eq!(json["scanned"]["languages"][0]["unresolved"], 0);
+        assert_eq!(json["scanned"]["languages"][0]["resolutionRate"], 1.0);
+        assert_eq!(json["cycles"][0]["size"], 2);
+        assert_eq!(json["cycles"][0]["crossDirectory"], true);
+        assert_eq!(json["cycles"][0]["files"][0], "src/a/x.rs");
+        // Complete and ranked: fanIn desc, ties by path.
+        assert_eq!(json["files"].as_array().unwrap().len(), 2);
+        assert_eq!(json["files"][0]["path"], "src/leaf.rs");
+        assert_eq!(json["files"][0]["fanIn"], 4);
+        assert_eq!(json["files"][0]["fanOut"], 0);
+        assert_eq!(json["files"][0]["instability"], 0.0);
+        assert_eq!(json["files"][0]["language"], "rust");
+        assert_eq!(json["hotspots"][0]["path"], "src/leaf.rs");
+        assert_eq!(json["hotspots"][0]["commits"], 9);
+        assert_eq!(json["hotspots"][0]["ratePerMonth"], 1.5);
+
+        // Without churn the hotspots key is absent, not empty.
+        let plain: serde_json::Value =
+            serde_json::from_str(&deps_json(&report, &[], false)).expect("plain report is JSON");
+        assert!(plain.get("hotspots").is_none());
     }
 
     #[test]

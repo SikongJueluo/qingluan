@@ -225,7 +225,9 @@ enum SkipKind {
     TooLarge,
 }
 
-fn collect_files(path: &Path, out: &mut Vec<PathBuf>) {
+/// Walk one path the way [`scan`] does (excludes, ignore files), collecting
+/// every file. Shared by the complexity scan and the dependency graph walk.
+pub(crate) fn collect_files(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_file() {
         out.push(path.to_path_buf());
         return;
@@ -264,7 +266,7 @@ fn analyze_candidate(
     if exclude.is_match(path) {
         return Outcome::Ignored;
     }
-    if generated_globs().is_match(path) || has_generated_component(path) {
+    if is_generated(path) {
         return Outcome::Skipped(SkipKind::Generated);
     }
 
@@ -294,6 +296,11 @@ fn analyze_candidate(
         functions: analysis.functions,
         nloc: analysis.nloc,
     })
+}
+
+/// Whether a path matches the built-in machine-output heuristics.
+pub(crate) fn is_generated(path: &Path) -> bool {
+    generated_globs().is_match(path) || has_generated_component(path)
 }
 
 fn has_generated_component(path: &Path) -> bool {

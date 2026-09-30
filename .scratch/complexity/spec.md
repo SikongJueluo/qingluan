@@ -183,3 +183,34 @@ cc/cognitive**；阈值 `nloc > 100`（函数，Clippy `too_many_lines` 同口�
 
 可见行为变化：默认 `--threshold` 的命中数从两规则变三规则并集（本仓实测 66）。
 本 spec 其余部分（v1 的口径与实现顺序）不变。
+
+## 耦合/依赖轴（2026-09-30，issue 08 已实现）
+
+调研：`docs/research/coupling-as-complexity.md`。结论：fan-in 不是缺陷（高 fan-in
+是稳定性定义，且是下界）；唯一的「违规」判据是**依赖环**（ADP + 工具共识）；
+唯一有实测支撑的组合是 `fan-in × churn`。这是**仓库级报告**，不是函数表的加列：
+
+```bash
+qingluan deps [PATH...]             # 摘要 + 环列表 + fan-in 榜
+qingluan deps --min-fanin 3 --churn # 加 fan-in × churn 热点表（读 VCS）
+qingluan deps --json                # schemaVersion 1，全量；有环仍 exit 1
+qingluan deps --quiet               # 只出摘要与环
+```
+
+- **退出码**：有环 → 1（工具共识：环可以 fail build）；fan-in/fan-out/I
+  只展示永不拦截。
+- **三分类解析语义**：每 specifier 记 `resolved`（仓库内边）/ `external`
+  （仓库外）/ `unresolved`（应有目标但失败）；只有 resolved 边进图，自环丢弃，
+  **不可解析的边绝不造环**。每语言输出 accounted 率。
+- **语言边界**（照调研 §6）：Rust 全量模块树（crate 根发现 + `#[path]` 规则
+  + 跨 crate 名；本仓 100% accounted）；Java 类型索引 + static 取容器、
+  通配不造边；Python 相对上行 + from-import 先探子模块、绝对 miss=external、
+  相对 miss=unresolved；Go 按 go.mod 前缀（包=目录归因）；TS/JS 只解析相对
+  specifier（`@/`、`#` 记 unresolved）。
+- **churn**：CLI 层读取（git 优先、jj 兜底），引擎保持纯函数（注入
+  `ChurnEntry`）；rate = commits / max(0.5月, 距首见月数)；热点 = fan_in ≥
+  min_fanin 且 rate ≥ 全体 p90，按 fan_in × rate 排序。
+- **JSON v1**：`root / scanned{files,languages[]} / cycles[] / files[] /
+  hotspots[]`（后者仅 `--churn`）；files 全量、fanIn desc → path asc。
+- 明确不做：fan-in 阈值/闸门、Zone of Pain、分层违规（另开 issue）、
+  tsconfig `paths` 别名解析（phase 2 候选）。

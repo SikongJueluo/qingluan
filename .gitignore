@@ -208,3 +208,4 @@ devenv.local.yaml
 **/target/
 packages/ir-proto/tests/fixtures/
 packages/cli/.test-fixtures/
+.dsh/

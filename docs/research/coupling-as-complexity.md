@@ -219,6 +219,32 @@ import 语句给不了。
 3 还需要**读 VCS 历史**（v1 刻意不读）。所以这不是在函数表里加一列，而是**另一种报告**（仓库级）。
 这个决定应该由用户拍板：接受读历史吗？还是先只做纯静态的依赖报告？
 
+### 落地补记（2026-09-30，issue 08 已实现）
+
+用户拍板：纯静态 + churn 都做、新子命令 `qingluan deps`、先修 Rust、有环非零退出。
+建议 1/2/3 全部落地（4/5 未做，照本节结论）。与本文预测的差异与实测：
+
+1. **Rust 解析修好了**：crate 根发现（Cargo.toml 手扫 + `tests/` 等目录文件）+
+   `mod` 模块树（`#[path]` 四条目录规则经 rustc 实测）+ `use` 路径解析
+   （含跨 crate 名与自引用 crate 名 ≡ `crate::`）。本仓 1263 specifiers、
+   **0 unresolved、100% accounted**（§7.6 记录的 2.7% 确是 bug）。
+   `#[cfg]` 门控 mod 照实包含（过近似）；macro 生成 mod 不可见（诚实漏检）。
+2. **三分类语义**（比「解析率」更细）：`resolved`（仓库内边）/ `external`
+   （仓库外）/ `unresolved`（应有目标但失败）。Java `import a.b.*` 记
+   unresolved 而非造边；Python 绝对 miss → external、相对 miss → unresolved
+   （只有相对导入没有外部语义）；TS 的 `@/`、`#` 记 unresolved、bare 记
+   external。本仓 TS 46% accounted：unresolved 全是 `./generated/**`（生成物
+   不进扫描集）与 `.vue`（语言盲区）——都是可见的诚实 miss。
+3. **churn 语义修正**：§7 的 hotspots.py 存在 first-wins bug——其 `first[line]`
+   实为**最新**提交时间（= 距上次修改），与「since first commit」的注释不符。
+   工具按文档语义实现（距首见）。用旧脚本复现 §7 数字时注意这一点。
+4. **环的输出**：SCC≥2（自环丢弃：文件内引用不是耦合），跨目录环排前
+   （「跨目录」= 成员父目录数 >1）。**有环 exit 1**（含 `--json`），
+   照工具共识。本仓首跑即报 7 个环，包括 `qingluan-complexity/src/deps/`
+   自身的 5 文件环与 `kernel.rs↔langs/mod.rs`——工具照见了自己。
+5. **churn 读取**：git 优先（colocated jj 仓库 git HEAD 覆盖全 jj 链，本仓
+   实测 63/65），jj `log --summary` 兜底非 colocated 仓库。
+
 ## 9. 修正记录（本文写作过程中改掉的自家错误）
 
 - `docs/research/code-length-metrics.md` §3.4 的三处：El Emam 2003 的评论作者是 **Evanco**（不是 Briand）；

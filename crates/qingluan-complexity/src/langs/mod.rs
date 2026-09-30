@@ -58,6 +58,19 @@ pub(crate) fn field_text<'a>(node: Node, field: &str, source: &'a [u8]) -> Optio
     node.child_by_field_name(field)?.utf8_text(source).ok()
 }
 
+/// Parse one buffer with the language's bundled grammar.
+///
+/// Same contract as [`crate::analyze_source`]: a grammar failure is a bug, an
+/// unparsable buffer still yields whatever tree-sitter could recover.
+pub(crate) fn parse(language: crate::Language, source: &[u8]) -> Option<tree_sitter::Tree> {
+    let profile = language.profile();
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&(profile.grammar)())
+        .expect("bundled grammar is ABI-compatible with the pinned tree-sitter core");
+    parser.parse(source, None)
+}
+
 /// How many named children a node has (used for parameter lists).
 pub(crate) fn named_child_count(node: Node) -> u32 {
     let mut cursor = node.walk();

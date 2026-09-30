@@ -69,6 +69,9 @@
 
       # CLI test-generated entries that must resolve workspace packages
       "packages/cli/.test-fixtures/"
+
+      # vibe code
+      ".dsh/"
     ];
   };
 }
